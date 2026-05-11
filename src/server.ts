@@ -100,6 +100,7 @@ io.on('connection', (socket) => {
 // Server Tick Loop (30Hz)
 setInterval(() => {
     const now = Date.now();
+    // ... rest of movement logic remains the same ...
     for (const id in players) {
         const player = players[id];
         
@@ -126,7 +127,7 @@ setInterval(() => {
             player.message = '';
         }
     }
-    io.emit('state', players);
+    io.emit('state', { players, ts: Date.now() });
 }, 1000 / 30);
 
 server.listen(PORT, () => {

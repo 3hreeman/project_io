@@ -58,6 +58,8 @@
 
         let myId = null;
         let players = {};
+        let stateBuffer = []; // Buffer to store server states
+        const RENDER_DELAY = 100; // 100ms delay for smooth interpolation
         let inGame = false;
         let isChatting = false;
 
@@ -118,8 +120,18 @@
             myId = id;
         });
 
-        socket.on('state', (serverPlayers) => {
-            players = serverPlayers;
+        socket.on('state', (serverData) => {
+            // Push state into buffer for interpolation
+            stateBuffer.push({
+                players: serverData.players,
+                ts: serverData.ts
+            });
+            
+            // Limit buffer size
+            if (stateBuffer.length > 20) stateBuffer.shift();
+            
+            // Keep the latest players object for non-position data
+            players = serverData.players;
         });
 
         function update() {
@@ -158,31 +170,61 @@
             ctx.fillText(text, x, bubbleY + 17);
         }
 
+        function interpolate(p1, p2, ratio) {
+            return p1 + (p2 - p1) * ratio;
+        }
+
         function draw() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+            const now = Date.now();
+            const renderTime = now - RENDER_DELAY;
+
+            // Find the two states to interpolate between
+            let state1 = null;
+            let state2 = null;
+
+            for (let i = 0; i < stateBuffer.length - 1; i++) {
+                const s1 = stateBuffer[i];
+                const s2 = stateBuffer[i + 1];
+                if (renderTime >= s1.ts && renderTime <= s2.ts) {
+                    state1 = s1;
+                    state2 = s2;
+                    break;
+                }
+            }
+
             for (const id in players) {
                 const player = players[id];
+                let renderX = player.x;
+                let renderY = player.y;
+
+                // Interpolate position
+                if (state1 && state2 && state1.players[id] && state2.players[id]) {
+                    const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
+                    renderX = interpolate(state1.players[id].x, state2.players[id].x, ratio);
+                    renderY = interpolate(state1.players[id].y, state2.players[id].y, ratio);
+                }
                 
                 // Draw Player
                 ctx.fillStyle = player.color;
-                ctx.fillRect(player.x - 15, player.y - 15, 30, 30);
+                ctx.fillRect(renderX - 15, renderY - 15, 30, 30);
 
                 if (id === myId) {
                     ctx.strokeStyle = 'white';
                     ctx.lineWidth = 2;
-                    ctx.strokeRect(player.x - 15, player.y - 15, 30, 30);
+                    ctx.strokeRect(renderX - 15, renderY - 15, 30, 30);
                 }
 
                 // Draw Nickname
                 ctx.fillStyle = 'white';
                 ctx.font = 'bold 14px Arial';
                 ctx.textAlign = 'center';
-                ctx.fillText(player.nickname, player.x, player.y - 25);
+                ctx.fillText(player.nickname, renderX, renderY - 25);
 
                 // Draw Chat Bubble
                 if (player.message) {
-                    drawChatBubble(player.x, player.y, player.message);
+                    drawChatBubble(renderX, renderY, player.message);
                 }
             }
 
