@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time .io Game</title>
+    <style>
+        body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #222; color: white; font-family: sans-serif; }
+        canvas { border: 2px solid #555; background: #000; }
+        #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1>.io Game Prototype</h1>
+        <p>Use WASD to move</p>
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let myId = null;
+        let players = {};
+
+        const keys = {
+            w: false,
+            a: false,
+            s: false,
+            d: false
+        };
+
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = true;
+        });
+
+        window.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = false;
+        });
+
+        socket.on('init', (id) => {
+            myId = id;
+        });
+
+        socket.on('state', (serverPlayers) => {
+            players = serverPlayers;
+        });
+
+        function update() {
+            socket.emit('input', keys);
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (const id in players) {
+                const player = players[id];
+                ctx.fillStyle = player.color;
+                ctx.fillRect(player.x - 15, player.y - 15, 30, 30);
+
+                if (id === myId) {
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(player.x - 15, player.y - 15, 30, 30);
+                }
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        // Input loop
+        setInterval(update, 1000 / 30);
+        
+        // Start rendering
+        draw();
+    </script>
+</body>
+</html>
