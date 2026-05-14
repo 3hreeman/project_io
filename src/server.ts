@@ -44,28 +44,17 @@ interface Projectile {
     y: number;
     vx: number;
     vy: number;
-    life: number; // Remaining time in seconds
-    active: boolean;
 }
 
 const players: { [id: string]: Player } = {};
 let projectiles: Projectile[] = [];
-const PROJECTILE_POOL_SIZE = 200;
-const projectilePool: Projectile[] = Array.from({ length: PROJECTILE_POOL_SIZE }, () => ({
-    id: '', ownerId: '', x: 0, y: 0, vx: 0, vy: 0, life: 0, active: false
-}));
 
-function getProjectileFromPool() {
-    return projectilePool.find(p => !p.active);
-}
-
-const MAX_PROJECTILE_LIFE = 2.0; // 2 seconds
 const MAX_DASH_CHARGES = 2;
 const DASH_RECHARGE_MS = 5000;
 const DASH_DURATION_MS = 150; 
-const BASE_SPEED = 150; 
-const PROJECTILE_SPEED = 300; 
-const DASH_SPEED = 750; 
+const BASE_SPEED = 150; // Pixels per second
+const PROJECTILE_SPEED = 300; // Pixels per second
+const DASH_SPEED = 750; // Pixels per second
 
 const getRandomColor = () => {
     const letters = '0123456789ABCDEF';
@@ -132,18 +121,15 @@ io.on('connection', (socket) => {
     socket.on('shoot', (dir: { x: number, y: number }) => {
         const player = players[socket.id];
         if (player && !player.isDead) {
-            const p = getProjectileFromPool();
-            if (p) {
-                const angle = Math.atan2(dir.y, dir.x);
-                p.id = Math.random().toString(36).substr(2, 9);
-                p.ownerId = socket.id;
-                p.x = player.x;
-                p.y = player.y;
-                p.vx = Math.cos(angle) * PROJECTILE_SPEED;
-                p.vy = Math.sin(angle) * PROJECTILE_SPEED;
-                p.life = MAX_PROJECTILE_LIFE;
-                p.active = true;
-            }
+            const angle = Math.atan2(dir.y, dir.x);
+            projectiles.push({
+                id: Math.random().toString(36).substr(2, 9),
+                ownerId: socket.id,
+                x: player.x,
+                y: player.y,
+                vx: Math.cos(angle) * PROJECTILE_SPEED,
+                vy: Math.sin(angle) * PROJECTILE_SPEED
+            });
         }
     });
 
@@ -166,17 +152,16 @@ let lastTickTime = Date.now();
 // Server Tick Loop (30Hz)
 setInterval(() => {
     const now = Date.now();
-    const dt = (now - lastTickTime) / 1000; 
+    const dt = (now - lastTickTime) / 1000; // Delta time in seconds
     lastTickTime = now;
     
-    // Update Active Projectiles
-    const activeProjectiles = projectilePool.filter(p => p.active);
+    // Update Projectiles and Collision
+    let projectilesToRemove = new Set<string>();
 
-    for (let i = 0; i < activeProjectiles.length; i++) {
-        const p = activeProjectiles[i];
+    for (let i = 0; i < projectiles.length; i++) {
+        const p = projectiles[i];
         p.x += p.vx * dt;
         p.y += p.vy * dt;
-        p.life -= dt;
 
         // 1. Collision Check with Players
         for (const id in players) {
@@ -197,34 +182,32 @@ setInterval(() => {
                         victim.respawnTime = now + 5000;
                     }
                 }
-                p.active = false;
-                break;
+                projectilesToRemove.add(p.id);
             }
         }
-        if (!p.active) continue;
 
         // 2. Collision Check with other Projectiles
-        for (let j = 0; j < activeProjectiles.length; j++) {
-            const p2 = activeProjectiles[j];
-            if (p === p2 || !p2.active || p.ownerId === p2.ownerId) continue; 
+        for (let j = i + 1; j < projectiles.length; j++) {
+            const p2 = projectiles[j];
+            if (p.ownerId === p2.ownerId) continue; 
 
             const dx = p.x - p2.x;
             const dy = p.y - p2.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
 
             if (distance < 10) { 
-                p.active = false;
-                p2.active = false;
-                break;
+                projectilesToRemove.add(p.id);
+                projectilesToRemove.add(p2.id);
             }
         }
-        if (!p.active) continue;
 
-        // 3. Lifetime and Boundary Check
-        if (p.life <= 0 || p.x < -50 || p.x > WORLD_WIDTH + 50 || p.y < -50 || p.y > WORLD_HEIGHT + 50) {
-            p.active = false;
+        // 3. Remove projectiles that go off-screen
+        if (p.x < -50 || p.x > WORLD_WIDTH + 50 || p.y < -50 || p.y > WORLD_HEIGHT + 50) {
+            projectilesToRemove.add(p.id);
         }
     }
+
+    projectiles = projectiles.filter(p => !projectilesToRemove.has(p.id));
 
     for (const id in players) {
         const player = players[id];

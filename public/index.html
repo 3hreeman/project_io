@@ -90,70 +90,8 @@
         let myId = null;
         let players = {};
         let clientProjectiles = new Map(); 
-        
-        // --- Object Pooling for Performance ---
-        const PARTICLE_POOL_SIZE = 500;
-        const GHOST_POOL_SIZE = 100;
-        
-        class Particle {
-            constructor() {
-                this.reset(0, 0, '#000', 0, 0, 0);
-                this.active = false;
-            }
-            reset(x, y, color, speed, size, life) {
-                this.x = x;
-                this.y = y;
-                this.color = color;
-                const angle = Math.random() * Math.PI * 2;
-                this.vx = Math.cos(angle) * speed * (0.5 + Math.random());
-                this.vy = Math.sin(angle) * speed * (0.5 + Math.random());
-                this.size = size;
-                this.life = life;
-                this.maxLife = life;
-                this.active = true;
-            }
-            update(dt) {
-                if (!this.active) return;
-                const scale = dt / 16.66;
-                this.x += this.vx * scale;
-                this.y += this.vy * scale;
-                this.life -= scale;
-                if (this.life <= 0) this.active = false;
-            }
-            draw(ctx) {
-                if (!this.active) return;
-                ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
-                ctx.fillStyle = this.color;
-                ctx.fillRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size);
-                ctx.globalAlpha = 1.0;
-            }
-        }
-
-        const particlePool = Array.from({ length: PARTICLE_POOL_SIZE }, () => new Particle());
-        const ghostPool = Array.from({ length: GHOST_POOL_SIZE }, () => ({ x: 0, y: 0, color: '#000', life: 0, active: false }));
-
-        function createExplosion(x, y, color, count, speed, size) {
-            let spawned = 0;
-            for (let p of particlePool) {
-                if (!p.active) {
-                    p.reset(x, y, color, speed, size, 20 + Math.random() * 20);
-                    spawned++;
-                    if (spawned >= count) break;
-                }
-            }
-        }
-
-        function createGhost(x, y, color) {
-            const g = ghostPool.find(g => !g.active);
-            if (g) {
-                g.x = x;
-                g.y = y;
-                g.color = color;
-                g.life = 1.0;
-                g.active = true;
-            }
-        }
-
+        let particles = []; 
+        let ghosts = []; 
         let stateBuffer = []; 
         const RENDER_DELAY = 100; 
         let inGame = false;
@@ -167,6 +105,43 @@
         let cameraX = 0;
         let cameraY = 0;
         let lastTimestamp = Date.now();
+
+        // --- Particle System ---
+        class Particle {
+            constructor(x, y, color, speed, size, life) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                const angle = Math.random() * Math.PI * 2;
+                this.vx = Math.cos(angle) * speed * (0.5 + Math.random());
+                this.vy = Math.sin(angle) * speed * (0.5 + Math.random());
+                this.size = size;
+                this.life = life;
+                this.maxLife = life;
+            }
+            update(dt) {
+                const scale = dt / 16.66;
+                this.x += this.vx * scale;
+                this.y += this.vy * scale;
+                this.life -= scale;
+            }
+            draw(ctx) {
+                ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size);
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        function createExplosion(x, y, color, count, speed, size) {
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle(x, y, color, speed, size, 20 + Math.random() * 20));
+            }
+        }
+
+        function createGhost(x, y, color) {
+            ghosts.push({ x, y, color, life: 1.0 });
+        }
 
         // Game Start
         startBtn.onclick = () => {
@@ -218,6 +193,7 @@
             const rect = canvas.getBoundingClientRect();
             mouseX = e.clientX - rect.left;
             mouseY = e.clientY - rect.top;
+            // Update world mouse position based on current camera
             worldMouseX = mouseX + cameraX;
             worldMouseY = mouseY + cameraY;
         });
@@ -404,7 +380,7 @@
             ctx.fillRect(barX, barY, hpWidth, height);
         }
 
-        function drawGrid() {
+        function drawGrid(camX, camY) {
             ctx.strokeStyle = '#333';
             ctx.lineWidth = 1;
             const gridSize = 50;
@@ -420,6 +396,7 @@
             }
             ctx.stroke();
 
+            // World Border
             ctx.strokeStyle = '#555';
             ctx.lineWidth = 5;
             ctx.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
@@ -431,6 +408,7 @@
             lastTimestamp = now;
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
             const renderTime = now - RENDER_DELAY;
             let state1 = null;
             let state2 = null;
@@ -444,19 +422,27 @@
                 }
             }
 
+            // --- Camera System ---
             const myPlayer = players[myId];
             if (myPlayer) {
                 let targetX = myPlayer.x;
                 let targetY = myPlayer.y;
+                
+                // Interpolate camera for smooth tracking
                 if (state1 && state2 && state1.players[myId] && state2.players[myId]) {
                     const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
                     targetX = interpolate(state1.players[myId].x, state2.players[myId].x, ratio);
                     targetY = interpolate(state1.players[myId].y, state2.players[myId].y, ratio);
                 }
+
                 cameraX = targetX - VIEW_WIDTH / 2;
                 cameraY = targetY - VIEW_HEIGHT / 2;
+
+                // Clamp camera to world bounds
                 cameraX = Math.max(0, Math.min(cameraX, WORLD_WIDTH - VIEW_WIDTH));
                 cameraY = Math.max(0, Math.min(cameraY, WORLD_HEIGHT - VIEW_HEIGHT));
+                
+                // Update world mouse coords
                 worldMouseX = mouseX + cameraX;
                 worldMouseY = mouseY + cameraY;
             }
@@ -466,25 +452,22 @@
 
             drawGrid();
 
-            // Update & Draw Ghosts (Using Pool)
-            ghostPool.forEach(g => {
-                if (!g.active) return;
+            // Update & Draw Ghosts
+            ghosts = ghosts.filter(g => {
                 g.life -= dt / 400; 
-                if (g.life <= 0) {
-                    g.active = false;
-                    return;
-                }
+                if (g.life <= 0) return false;
                 ctx.globalAlpha = g.life * 0.4;
                 ctx.fillStyle = g.color;
                 ctx.fillRect(g.x - 15, g.y - 15, 30, 30);
                 ctx.globalAlpha = 1.0;
+                return true;
             });
 
-            // Update & Draw Particles (Using Pool)
-            particlePool.forEach(p => {
-                if (!p.active) return;
+            // Update & Draw Particles
+            particles = particles.filter(p => {
                 p.update(dt);
                 p.draw(ctx);
+                return p.life > 0;
             });
 
             clientProjectiles.forEach(p => {
@@ -500,14 +483,18 @@
             for (const id in players) {
                 const player = players[id];
                 if (player.isDead) continue;
+
                 let renderX = player.x;
                 let renderY = player.y;
+
                 if (state1 && state2 && state1.players[id] && state2.players[id]) {
                     const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
                     renderX = interpolate(state1.players[id].x, state2.players[id].x, ratio);
                     renderY = interpolate(state1.players[id].y, state2.players[id].y, ratio);
                 }
+                
                 if (id === myId) drawAimIndicator(renderX, renderY);
+
                 if (player.isDashing) {
                     if (Math.random() > 0.4) createGhost(renderX, renderY, player.color);
                     ctx.fillStyle = player.color;
@@ -515,13 +502,16 @@
                     ctx.fillRect(renderX - 20, renderY - 20, 40, 40);
                     ctx.globalAlpha = 1.0;
                 }
+
                 ctx.fillStyle = player.color;
                 ctx.fillRect(renderX - 15, renderY - 15, 30, 30);
+
                 if (id === myId) {
                     ctx.strokeStyle = 'white';
                     ctx.lineWidth = 2;
                     ctx.strokeRect(renderX - 15, renderY - 15, 30, 30);
                 }
+
                 drawHPBar(renderX, renderY, player.hp, player.maxHp);
                 ctx.fillStyle = 'white';
                 ctx.font = 'bold 14px Arial';
@@ -529,7 +519,9 @@
                 ctx.fillText(player.nickname, renderX, renderY - 35);
                 if (player.message) drawChatBubble(renderX, renderY, player.message);
             }
+
             ctx.restore();
+
             requestAnimationFrame(draw);
         }
 
