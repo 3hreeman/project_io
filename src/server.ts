@@ -9,6 +9,9 @@ const io = new Server(server);
 
 const PORT = 3000;
 
+const WORLD_WIDTH = 1024;
+const WORLD_HEIGHT = 576;
+
 app.use(express.static(path.join(__dirname, '../public')));
 
 interface Player {
@@ -17,13 +20,52 @@ interface Player {
     y: number;
     color: string;
     nickname: string;
-    targetX: number | null;
-    targetY: number | null;
     message: string;
     messageTime: number;
+    hp: number;
+    maxHp: number;
+    atk: number;
+    isDead: boolean;
+    respawnTime: number;
+    // Dash System
+    dashCharges: number;
+    lastDashChargeTime: number;
+    isDashing: boolean;
+    dashEndTime: number;
+    dashVx: number;
+    dashVy: number;
+    input?: { w: boolean, a: boolean, s: boolean, d: boolean };
+}
+
+interface Projectile {
+    id: string;
+    ownerId: string;
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    life: number; // Remaining time in seconds
+    active: boolean;
 }
 
 const players: { [id: string]: Player } = {};
+let projectiles: Projectile[] = [];
+const PROJECTILE_POOL_SIZE = 200;
+const projectilePool: Projectile[] = Array.from({ length: PROJECTILE_POOL_SIZE }, () => ({
+    id: '', ownerId: '', x: 0, y: 0, vx: 0, vy: 0, life: 0, active: false
+}));
+
+function getProjectileFromPool() {
+    return projectilePool.find(p => !p.active);
+}
+
+const MAX_PROJECTILE_LIFE = 2.0; // 2 seconds
+const MAX_DASH_CHARGES = 2;
+const DASH_RECHARGE_MS = 5000;
+const DASH_DURATION_MS = 150; 
+const BASE_SPEED = 150; 
+const PROJECTILE_SPEED = 300; 
+const DASH_SPEED = 750; 
 
 const getRandomColor = () => {
     const letters = '0123456789ABCDEF';
@@ -41,45 +83,67 @@ io.on('connection', (socket) => {
     socket.on('join', (nickname: string) => {
         players[socket.id] = {
             id: socket.id,
-            x: Math.floor(Math.random() * 700) + 50,
-            y: Math.floor(Math.random() * 500) + 50,
+            x: Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50,
+            y: Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50,
             color: getRandomColor(),
             nickname: nickname || 'Guest',
-            targetX: null,
-            targetY: null,
             message: '',
-            messageTime: 0
+            messageTime: 0,
+            hp: 100,
+            maxHp: 100,
+            atk: 10,
+            isDead: false,
+            respawnTime: 0,
+            dashCharges: MAX_DASH_CHARGES,
+            lastDashChargeTime: Date.now(),
+            isDashing: false,
+            dashEndTime: 0,
+            dashVx: 0,
+            dashVy: 0
         };
         socket.emit('init', socket.id);
     });
 
     socket.on('input', (input: { w: boolean, a: boolean, s: boolean, d: boolean }) => {
         const player = players[socket.id];
-        if (player) {
-            const speed = 5;
-            let moved = false;
-            if (input.w) { player.y -= speed; moved = true; }
-            if (input.s) { player.y += speed; moved = true; }
-            if (input.a) { player.x -= speed; moved = true; }
-            if (input.d) { player.x += speed; moved = true; }
-
-            if (moved) {
-                // Keyboard move cancels mouse move
-                player.targetX = null;
-                player.targetY = null;
-            }
-
-            // Simple boundary check
-            player.x = Math.max(15, Math.min(785, player.x));
-            player.y = Math.max(15, Math.min(585, player.y));
+        if (player && !player.isDead && !player.isDashing) {
+            player.input = input;
         }
     });
 
-    socket.on('move-to', (pos: { x: number, y: number }) => {
+    socket.on('dash', (dir: { x: number, y: number }) => {
         const player = players[socket.id];
-        if (player) {
-            player.targetX = pos.x;
-            player.targetY = pos.y;
+        if (player && !player.isDead && !player.isDashing && player.dashCharges > 0) {
+            const now = Date.now();
+            const angle = Math.atan2(dir.y, dir.x);
+            
+            player.isDashing = true;
+            player.dashEndTime = now + DASH_DURATION_MS;
+            player.dashVx = Math.cos(angle) * DASH_SPEED;
+            player.dashVy = Math.sin(angle) * DASH_SPEED;
+            
+            player.dashCharges--;
+            if (player.dashCharges === MAX_DASH_CHARGES - 1) {
+                player.lastDashChargeTime = now;
+            }
+        }
+    });
+
+    socket.on('shoot', (dir: { x: number, y: number }) => {
+        const player = players[socket.id];
+        if (player && !player.isDead) {
+            const p = getProjectileFromPool();
+            if (p) {
+                const angle = Math.atan2(dir.y, dir.x);
+                p.id = Math.random().toString(36).substr(2, 9);
+                p.ownerId = socket.id;
+                p.x = player.x;
+                p.y = player.y;
+                p.vx = Math.cos(angle) * PROJECTILE_SPEED;
+                p.vy = Math.sin(angle) * PROJECTILE_SPEED;
+                p.life = MAX_PROJECTILE_LIFE;
+                p.active = true;
+            }
         }
     });
 
@@ -97,37 +161,124 @@ io.on('connection', (socket) => {
     });
 });
 
+let lastTickTime = Date.now();
+
 // Server Tick Loop (30Hz)
 setInterval(() => {
     const now = Date.now();
-    // ... rest of movement logic remains the same ...
+    const dt = (now - lastTickTime) / 1000; 
+    lastTickTime = now;
+    
+    // Update Active Projectiles
+    const activeProjectiles = projectilePool.filter(p => p.active);
+
+    for (let i = 0; i < activeProjectiles.length; i++) {
+        const p = activeProjectiles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+
+        // 1. Collision Check with Players
+        for (const id in players) {
+            const victim = players[id];
+            if (victim.isDead || id === p.ownerId || victim.isDashing) continue; 
+
+            const dx = p.x - victim.x;
+            const dy = p.y - victim.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance < 20) { 
+                const attacker = players[p.ownerId];
+                if (attacker) {
+                    victim.hp -= attacker.atk;
+                    if (victim.hp <= 0) {
+                        victim.hp = 0;
+                        victim.isDead = true;
+                        victim.respawnTime = now + 5000;
+                    }
+                }
+                p.active = false;
+                break;
+            }
+        }
+        if (!p.active) continue;
+
+        // 2. Collision Check with other Projectiles
+        for (let j = 0; j < activeProjectiles.length; j++) {
+            const p2 = activeProjectiles[j];
+            if (p === p2 || !p2.active || p.ownerId === p2.ownerId) continue; 
+
+            const dx = p.x - p2.x;
+            const dy = p.y - p2.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance < 10) { 
+                p.active = false;
+                p2.active = false;
+                break;
+            }
+        }
+        if (!p.active) continue;
+
+        // 3. Lifetime and Boundary Check
+        if (p.life <= 0 || p.x < -50 || p.x > WORLD_WIDTH + 50 || p.y < -50 || p.y > WORLD_HEIGHT + 50) {
+            p.active = false;
+        }
+    }
+
     for (const id in players) {
         const player = players[id];
         
-        // Handle mouse movement
-        if (player.targetX !== null && player.targetY !== null) {
-            const dx = player.targetX - player.x;
-            const dy = player.targetY - player.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            const speed = 5;
+        // Handle Respawn
+        if (player.isDead && now >= player.respawnTime) {
+            player.isDead = false;
+            player.hp = player.maxHp;
+            player.x = Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50;
+            player.y = Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50;
+            player.dashCharges = MAX_DASH_CHARGES;
+        }
 
-            if (distance < speed) {
-                player.x = player.targetX;
-                player.y = player.targetY;
-                player.targetX = null;
-                player.targetY = null;
-            } else {
-                player.x += (dx / distance) * speed;
-                player.y += (dy / distance) * speed;
+        // Handle Dash recharge
+        if (player.dashCharges < MAX_DASH_CHARGES) {
+            if (now - player.lastDashChargeTime >= DASH_RECHARGE_MS) {
+                player.dashCharges++;
+                player.lastDashChargeTime = now;
             }
         }
+
+        // Handle Movement and Dash
+        if (player.isDashing) {
+            if (now >= player.dashEndTime) {
+                player.isDashing = false;
+            } else {
+                player.x += player.dashVx * dt;
+                player.y += player.dashVy * dt;
+            }
+        } else if (!player.isDead && player.input) {
+            let dx = 0;
+            let dy = 0;
+            if (player.input.w) dy -= 1;
+            if (player.input.s) dy += 1;
+            if (player.input.a) dx -= 1;
+            if (player.input.d) dx += 1;
+
+            if (dx !== 0 || dy !== 0) {
+                const mag = Math.sqrt(dx * dx + dy * dy);
+                player.x += (dx / mag) * BASE_SPEED * dt;
+                player.y += (dy / mag) * BASE_SPEED * dt;
+            }
+        }
+
+        // Boundary check
+        player.x = Math.max(15, Math.min(WORLD_WIDTH - 15, player.x));
+        player.y = Math.max(15, Math.min(WORLD_HEIGHT - 15, player.y));
 
         // Clear chat messages after 5 seconds
         if (player.message && now - player.messageTime > 5000) {
             player.message = '';
         }
     }
-    io.emit('state', { players, ts: Date.now() });
+    io.emit('state', { players, projectiles, ts: Date.now() });
 }, 1000 / 30);
 
 server.listen(PORT, () => {

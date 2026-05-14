@@ -25,6 +25,18 @@
         #chat-input { width: 100%; padding: 10px; border-radius: 20px; border: 2px solid #4caf50; background: rgba(0,0,0,0.7); color: white; outline: none; }
 
         #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; opacity: 0.7; }
+        #dash-ui { position: absolute; bottom: 10px; right: 10px; pointer-events: none; text-align: right; }
+        .dash-charge { display: inline-block; width: 30px; height: 10px; background: #555; margin-left: 5px; border-radius: 5px; overflow: hidden; }
+        .dash-charge-fill { height: 100%; background: #00e5ff; width: 0%; transition: width 0.1s; }
+
+        #death-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(139, 0, 0, 0.6); display: none; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 20;
+            pointer-events: none;
+        }
+        #death-screen h1 { font-size: 64px; color: #ff0000; text-shadow: 2px 2px 10px black; margin: 0; }
+        #respawn-timer { font-size: 24px; color: white; margin-top: 20px; }
     </style>
 </head>
 <body>
@@ -35,13 +47,24 @@
             <button id="start-btn">Join Game</button>
         </div>
 
+        <div id="death-screen">
+            <h1>YOU DIED</h1>
+            <div id="respawn-timer">Respawning in 5s...</div>
+        </div>
+
         <div id="chat-input-container">
             <input type="text" id="chat-input" placeholder="Type a message and press Enter..." maxlength="50">
         </div>
 
         <div id="ui">
-            <p>WASD to move | Mouse Click to move | Enter to Chat</p>
+            <p>WASD to move | Click to Shoot | Right Click/Shift to Dash</p>
         </div>
+
+        <div id="dash-ui">
+            <div style="margin-bottom: 5px;">DASH</div>
+            <div id="dash-container"></div>
+        </div>
+
         <canvas id="gameCanvas" width="800" height="600"></canvas>
     </div>
 
@@ -51,19 +74,99 @@
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
         const overlay = document.getElementById('overlay');
+        const deathScreen = document.getElementById('death-screen');
+        const respawnTimerText = document.getElementById('respawn-timer');
         const startBtn = document.getElementById('start-btn');
         const nicknameInput = document.getElementById('nickname');
         const chatInputContainer = document.getElementById('chat-input-container');
         const chatInput = document.getElementById('chat-input');
+        const dashContainer = document.getElementById('dash-container');
+
+        const WORLD_WIDTH = 1024;
+        const WORLD_HEIGHT = 576;
+        const VIEW_WIDTH = 800;
+        const VIEW_HEIGHT = 600;
 
         let myId = null;
         let players = {};
-        let stateBuffer = []; // Buffer to store server states
-        const RENDER_DELAY = 100; // 100ms delay for smooth interpolation
+        let clientProjectiles = new Map(); 
+        
+        // --- Object Pooling for Performance ---
+        const PARTICLE_POOL_SIZE = 500;
+        const GHOST_POOL_SIZE = 100;
+        
+        class Particle {
+            constructor() {
+                this.reset(0, 0, '#000', 0, 0, 0);
+                this.active = false;
+            }
+            reset(x, y, color, speed, size, life) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                const angle = Math.random() * Math.PI * 2;
+                this.vx = Math.cos(angle) * speed * (0.5 + Math.random());
+                this.vy = Math.sin(angle) * speed * (0.5 + Math.random());
+                this.size = size;
+                this.life = life;
+                this.maxLife = life;
+                this.active = true;
+            }
+            update(dt) {
+                if (!this.active) return;
+                const scale = dt / 16.66;
+                this.x += this.vx * scale;
+                this.y += this.vy * scale;
+                this.life -= scale;
+                if (this.life <= 0) this.active = false;
+            }
+            draw(ctx) {
+                if (!this.active) return;
+                ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size);
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        const particlePool = Array.from({ length: PARTICLE_POOL_SIZE }, () => new Particle());
+        const ghostPool = Array.from({ length: GHOST_POOL_SIZE }, () => ({ x: 0, y: 0, color: '#000', life: 0, active: false }));
+
+        function createExplosion(x, y, color, count, speed, size) {
+            let spawned = 0;
+            for (let p of particlePool) {
+                if (!p.active) {
+                    p.reset(x, y, color, speed, size, 20 + Math.random() * 20);
+                    spawned++;
+                    if (spawned >= count) break;
+                }
+            }
+        }
+
+        function createGhost(x, y, color) {
+            const g = ghostPool.find(g => !g.active);
+            if (g) {
+                g.x = x;
+                g.y = y;
+                g.color = color;
+                g.life = 1.0;
+                g.active = true;
+            }
+        }
+
+        let stateBuffer = []; 
+        const RENDER_DELAY = 100; 
         let inGame = false;
         let isChatting = false;
 
         const keys = { w: false, a: false, s: false, d: false };
+        let mouseX = 0;
+        let mouseY = 0;
+        let worldMouseX = 0;
+        let worldMouseY = 0;
+        let cameraX = 0;
+        let cameraY = 0;
+        let lastTimestamp = Date.now();
 
         // Game Start
         startBtn.onclick = () => {
@@ -82,14 +185,12 @@
             
             if (e.key === 'Enter') {
                 if (isChatting) {
-                    // Send message
                     const msg = chatInput.value.trim();
                     if (msg) socket.emit('chat', msg);
                     chatInput.value = '';
                     chatInputContainer.style.display = 'none';
                     isChatting = false;
                 } else {
-                    // Open chat
                     chatInputContainer.style.display = 'block';
                     chatInput.focus();
                     isChatting = true;
@@ -97,7 +198,12 @@
                 return;
             }
 
-            if (isChatting) return; // Disable movement while chatting
+            if (isChatting) return;
+
+            if (e.key === 'Shift') {
+                handleDash('shift');
+                return;
+            }
 
             const key = e.key.toLowerCase();
             if (keys.hasOwnProperty(key)) keys[key] = true;
@@ -108,31 +214,135 @@
             if (keys.hasOwnProperty(key)) keys[key] = false;
         });
 
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouseX = e.clientX - rect.left;
+            mouseY = e.clientY - rect.top;
+            worldMouseX = mouseX + cameraX;
+            worldMouseY = mouseY + cameraY;
+        });
+
         canvas.addEventListener('mousedown', (e) => {
             if (!inGame || isChatting) return;
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            socket.emit('move-to', { x, y });
+            
+            if (e.button === 0) { 
+                const myPlayer = players[myId];
+                if (myPlayer && !myPlayer.isDead) {
+                    const dirX = worldMouseX - myPlayer.x;
+                    const dirY = worldMouseY - myPlayer.y;
+                    socket.emit('shoot', { x: dirX, y: dirY });
+                }
+            } else if (e.button === 2) { 
+                handleDash('mouse');
+            }
         });
+
+        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        function handleDash(type) {
+            const myPlayer = players[myId];
+            if (!myPlayer || myPlayer.isDead || myPlayer.isDashing || myPlayer.dashCharges <= 0) return;
+
+            let dirX = 0;
+            let dirY = 0;
+
+            if (type === 'shift') {
+                if (keys.w) dirY -= 1;
+                if (keys.s) dirY += 1;
+                if (keys.a) dirX -= 1;
+                if (keys.d) dirX += 1;
+                
+                if (dirX === 0 && dirY === 0) {
+                    dirX = worldMouseX - myPlayer.x;
+                    dirY = worldMouseY - myPlayer.y;
+                }
+            } else {
+                dirX = worldMouseX - myPlayer.x;
+                dirY = worldMouseY - myPlayer.y;
+            }
+
+            if (dirX !== 0 || dirY !== 0) {
+                socket.emit('dash', { x: dirX, y: dirY });
+            }
+        }
 
         socket.on('init', (id) => {
             myId = id;
         });
 
         socket.on('state', (serverData) => {
-            // Push state into buffer for interpolation
+            const oldPlayers = players;
+            const newPlayers = serverData.players;
+
+            for (const id in newPlayers) {
+                if (oldPlayers[id] && newPlayers[id].hp < oldPlayers[id].hp) {
+                    createExplosion(newPlayers[id].x, newPlayers[id].y, '#ff4444', 12, 4, 3);
+                }
+            }
+
+            const serverProjectiles = serverData.projectiles || [];
+            const serverProjIds = new Set(serverProjectiles.map(p => p.id));
+
+            for (let [id, cp] of clientProjectiles) {
+                if (!serverProjIds.has(id)) {
+                    if (cp.x > 0 && cp.x < WORLD_WIDTH && cp.y > 0 && cp.y < WORLD_HEIGHT) {
+                        createExplosion(cp.x, cp.y, '#ffff00', 6, 2, 2);
+                    }
+                    clientProjectiles.delete(id);
+                }
+            }
+
+            serverProjectiles.forEach(sp => {
+                if (!clientProjectiles.has(sp.id)) {
+                    clientProjectiles.set(sp.id, { ...sp });
+                } else {
+                    const cp = clientProjectiles.get(sp.id);
+                    const dist = Math.sqrt((cp.x - sp.x)**2 + (cp.y - sp.y)**2);
+                    if (dist > 25) { cp.x = sp.x; cp.y = sp.y; }
+                }
+            });
+
             stateBuffer.push({
                 players: serverData.players,
                 ts: serverData.ts
             });
-            
-            // Limit buffer size
             if (stateBuffer.length > 20) stateBuffer.shift();
             
-            // Keep the latest players object for non-position data
             players = serverData.players;
+
+            const myPlayer = players[myId];
+            if (myPlayer) {
+                if (myPlayer.isDead) {
+                    deathScreen.style.display = 'flex';
+                    const remaining = Math.max(0, Math.ceil((myPlayer.respawnTime - Date.now()) / 1000));
+                    respawnTimerText.innerText = `Respawning in ${remaining}s...`;
+                } else {
+                    deathScreen.style.display = 'none';
+                }
+                updateDashUI(myPlayer);
+            }
         });
+
+        function updateDashUI(player) {
+            dashContainer.innerHTML = '';
+            for (let i = 0; i < 2; i++) {
+                const charge = document.createElement('div');
+                charge.className = 'dash-charge';
+                const fill = document.createElement('div');
+                fill.className = 'dash-charge-fill';
+                
+                if (i < player.dashCharges) {
+                    fill.style.width = '100%';
+                } else if (i === player.dashCharges) {
+                    const elapsed = Date.now() - player.lastDashChargeTime;
+                    const percent = Math.min(100, (elapsed / 5000) * 100);
+                    fill.style.width = percent + '%';
+                }
+                
+                charge.appendChild(fill);
+                dashContainer.appendChild(charge);
+            }
+        }
 
         function update() {
             if (inGame && !isChatting) {
@@ -142,7 +352,6 @@
 
         function drawChatBubble(x, y, text) {
             if (!text) return;
-            
             ctx.font = '14px Arial';
             const textWidth = ctx.measureText(text).width;
             const padding = 8;
@@ -150,21 +359,15 @@
             const bubbleHeight = 25;
             const bubbleX = x - bubbleWidth / 2;
             const bubbleY = y - 65;
-
-            // Draw Bubble
             ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
             ctx.beginPath();
             ctx.roundRect(bubbleX, bubbleY, bubbleWidth, bubbleHeight, 5);
             ctx.fill();
-
-            // Draw Tail
             ctx.beginPath();
             ctx.moveTo(x, bubbleY + bubbleHeight);
             ctx.lineTo(x - 5, bubbleY + bubbleHeight + 5);
             ctx.lineTo(x + 5, bubbleY + bubbleHeight + 5);
             ctx.fill();
-
-            // Draw Text
             ctx.fillStyle = 'black';
             ctx.textAlign = 'center';
             ctx.fillText(text, x, bubbleY + 17);
@@ -174,16 +377,63 @@
             return p1 + (p2 - p1) * ratio;
         }
 
+        function drawAimIndicator(x, y) {
+            const angle = Math.atan2(worldMouseY - y, worldMouseX - x);
+            const dist = 50;
+            const endX = x + Math.cos(angle) * dist;
+            const endY = y + Math.sin(angle) * dist;
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(endX, endY);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.setLineDash([5, 5]);
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawHPBar(x, y, hp, maxHp) {
+            const width = 40;
+            const height = 6;
+            const barX = x - width / 2;
+            const barY = y + 25;
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(barX, barY, width, height);
+            const hpWidth = (hp / maxHp) * width;
+            ctx.fillStyle = hp > 30 ? '#4caf50' : '#f44336';
+            ctx.fillRect(barX, barY, hpWidth, height);
+        }
+
+        function drawGrid() {
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            const gridSize = 50;
+            
+            ctx.beginPath();
+            for (let x = 0; x <= WORLD_WIDTH; x += gridSize) {
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, WORLD_HEIGHT);
+            }
+            for (let y = 0; y <= WORLD_HEIGHT; y += gridSize) {
+                ctx.moveTo(0, y);
+                ctx.lineTo(WORLD_WIDTH, y);
+            }
+            ctx.stroke();
+
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 5;
+            ctx.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+        }
+
         function draw() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
             const now = Date.now();
-            const renderTime = now - RENDER_DELAY;
+            const dt = now - lastTimestamp;
+            lastTimestamp = now;
 
-            // Find the two states to interpolate between
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const renderTime = now - RENDER_DELAY;
             let state1 = null;
             let state2 = null;
-
             for (let i = 0; i < stateBuffer.length - 1; i++) {
                 const s1 = stateBuffer[i];
                 const s2 = stateBuffer[i + 1];
@@ -194,40 +444,92 @@
                 }
             }
 
+            const myPlayer = players[myId];
+            if (myPlayer) {
+                let targetX = myPlayer.x;
+                let targetY = myPlayer.y;
+                if (state1 && state2 && state1.players[myId] && state2.players[myId]) {
+                    const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
+                    targetX = interpolate(state1.players[myId].x, state2.players[myId].x, ratio);
+                    targetY = interpolate(state1.players[myId].y, state2.players[myId].y, ratio);
+                }
+                cameraX = targetX - VIEW_WIDTH / 2;
+                cameraY = targetY - VIEW_HEIGHT / 2;
+                cameraX = Math.max(0, Math.min(cameraX, WORLD_WIDTH - VIEW_WIDTH));
+                cameraY = Math.max(0, Math.min(cameraY, WORLD_HEIGHT - VIEW_HEIGHT));
+                worldMouseX = mouseX + cameraX;
+                worldMouseY = mouseY + cameraY;
+            }
+
+            ctx.save();
+            ctx.translate(-cameraX, -cameraY);
+
+            drawGrid();
+
+            // Update & Draw Ghosts (Using Pool)
+            ghostPool.forEach(g => {
+                if (!g.active) return;
+                g.life -= dt / 400; 
+                if (g.life <= 0) {
+                    g.active = false;
+                    return;
+                }
+                ctx.globalAlpha = g.life * 0.4;
+                ctx.fillStyle = g.color;
+                ctx.fillRect(g.x - 15, g.y - 15, 30, 30);
+                ctx.globalAlpha = 1.0;
+            });
+
+            // Update & Draw Particles (Using Pool)
+            particlePool.forEach(p => {
+                if (!p.active) return;
+                p.update(dt);
+                p.draw(ctx);
+            });
+
+            clientProjectiles.forEach(p => {
+                const dtSeconds = dt / 1000;
+                p.x += p.vx * dtSeconds;
+                p.y += p.vy * dtSeconds;
+                ctx.fillStyle = 'yellow';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
             for (const id in players) {
                 const player = players[id];
+                if (player.isDead) continue;
                 let renderX = player.x;
                 let renderY = player.y;
-
-                // Interpolate position
                 if (state1 && state2 && state1.players[id] && state2.players[id]) {
                     const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
                     renderX = interpolate(state1.players[id].x, state2.players[id].x, ratio);
                     renderY = interpolate(state1.players[id].y, state2.players[id].y, ratio);
                 }
-                
-                // Draw Player
+                if (id === myId) drawAimIndicator(renderX, renderY);
+                if (player.isDashing) {
+                    if (Math.random() > 0.4) createGhost(renderX, renderY, player.color);
+                    ctx.fillStyle = player.color;
+                    ctx.globalAlpha = 0.3;
+                    ctx.fillRect(renderX - 20, renderY - 20, 40, 40);
+                    ctx.globalAlpha = 1.0;
+                }
                 ctx.fillStyle = player.color;
                 ctx.fillRect(renderX - 15, renderY - 15, 30, 30);
-
                 if (id === myId) {
                     ctx.strokeStyle = 'white';
                     ctx.lineWidth = 2;
                     ctx.strokeRect(renderX - 15, renderY - 15, 30, 30);
                 }
-
-                // Draw Nickname
+                drawHPBar(renderX, renderY, player.hp, player.maxHp);
                 ctx.fillStyle = 'white';
                 ctx.font = 'bold 14px Arial';
                 ctx.textAlign = 'center';
-                ctx.fillText(player.nickname, renderX, renderY - 25);
-
-                // Draw Chat Bubble
-                if (player.message) {
-                    drawChatBubble(renderX, renderY, player.message);
-                }
+                ctx.fillText(player.nickname, renderX, renderY - 35);
+                if (player.message) drawChatBubble(renderX, renderY, player.message);
             }
-
+            ctx.restore();
             requestAnimationFrame(draw);
         }
 
