@@ -14,6 +14,20 @@ const WORLD_HEIGHT = 576;
 
 app.use(express.static(path.join(__dirname, '../public')));
 
+interface PlayerStats {
+    baseSpeed: number;
+    shootInterval: number;
+    projectileSpeed: number;
+    meleeCooldown: number;
+    meleeDamage: number;
+    meleeRange: number;
+    meleeArc: number;
+    maxAmmo: number;
+    reloadTime: number;
+    maxHp: number;
+    dashRecharge: number;
+}
+
 interface Player {
     id: string;
     x: number;
@@ -23,19 +37,38 @@ interface Player {
     message: string;
     messageTime: number;
     hp: number;
-    maxHp: number;
-    atk: number;
+    stats: PlayerStats; // Centralized for upgrades
     isDead: boolean;
     respawnTime: number;
-    // Dash System
+    // Combat State
+    ammo: number;
+    isReloading: boolean;
+    reloadEndTime: number;
+    lastShootTime: number;
+    lastMeleeTime: number;
+    // Dash State
     dashCharges: number;
     lastDashChargeTime: number;
     isDashing: boolean;
     dashEndTime: number;
     dashVx: number;
     dashVy: number;
-    input?: { w: boolean, a: boolean, s: boolean, d: boolean };
+    input?: { w: boolean, a: boolean, s: boolean, d: boolean, shooting: boolean, shootAngle: number };
 }
+
+const INITIAL_STATS: PlayerStats = {
+    baseSpeed: 150,
+    shootInterval: 100, // 0.1s as requested
+    projectileSpeed: 300,
+    meleeCooldown: 2000, // 2s as requested
+    meleeDamage: 25,
+    meleeRange: 80, // Doubled from 40
+    meleeArc: Math.PI, // Doubled from 90 to 180 degrees
+    maxAmmo: 20,
+    reloadTime: 2000,
+    maxHp: 100,
+    dashRecharge: 5000
+};
 
 interface Projectile {
     id: string;
@@ -50,11 +83,8 @@ const players: { [id: string]: Player } = {};
 let projectiles: Projectile[] = [];
 
 const MAX_DASH_CHARGES = 2;
-const DASH_RECHARGE_MS = 5000;
 const DASH_DURATION_MS = 150; 
-const BASE_SPEED = 150; // Pixels per second
-const PROJECTILE_SPEED = 300; // Pixels per second
-const DASH_SPEED = 750; // Pixels per second
+const DASH_SPEED = 750; 
 
 const getRandomColor = () => {
     const letters = '0123456789ABCDEF';
@@ -68,7 +98,6 @@ const getRandomColor = () => {
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
 
-    // Initial state: waiting for 'join' event
     socket.on('join', (nickname: string) => {
         players[socket.id] = {
             id: socket.id,
@@ -78,11 +107,15 @@ io.on('connection', (socket) => {
             nickname: nickname || 'Guest',
             message: '',
             messageTime: 0,
-            hp: 100,
-            maxHp: 100,
-            atk: 10,
+            hp: INITIAL_STATS.maxHp,
+            stats: { ...INITIAL_STATS },
             isDead: false,
             respawnTime: 0,
+            ammo: INITIAL_STATS.maxAmmo,
+            isReloading: false,
+            reloadEndTime: 0,
+            lastShootTime: 0,
+            lastMeleeTime: 0,
             dashCharges: MAX_DASH_CHARGES,
             lastDashChargeTime: Date.now(),
             isDashing: false,
@@ -93,10 +126,52 @@ io.on('connection', (socket) => {
         socket.emit('init', socket.id);
     });
 
-    socket.on('input', (input: { w: boolean, a: boolean, s: boolean, d: boolean }) => {
+    socket.on('input', (input: { w: boolean, a: boolean, s: boolean, d: boolean, shooting: boolean, shootAngle: number }) => {
         const player = players[socket.id];
-        if (player && !player.isDead && !player.isDashing) {
+        if (player && !player.isDead) {
             player.input = input;
+        }
+    });
+
+    socket.on('reload', () => {
+        const player = players[socket.id];
+        if (player && !player.isDead && !player.isReloading && player.ammo < player.stats.maxAmmo) {
+            player.isReloading = true;
+            player.reloadEndTime = Date.now() + player.stats.reloadTime;
+        }
+    });
+
+    socket.on('melee', (angle: number) => {
+        const player = players[socket.id];
+        const now = Date.now();
+        if (player && !player.isDead && now - player.lastMeleeTime > player.stats.meleeCooldown) {
+            player.lastMeleeTime = now;
+            
+            for (const id in players) {
+                if (id === socket.id) continue;
+                const victim = players[id];
+                if (victim.isDead || victim.isDashing) continue;
+
+                const dx = victim.x - player.x;
+                const dy = victim.y - player.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist < player.stats.meleeRange + 15) { 
+                    let targetAngle = Math.atan2(dy, dx);
+                    let angleDiff = Math.abs(targetAngle - angle);
+                    if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+
+                    if (angleDiff <= player.stats.meleeArc / 2) {
+                        victim.hp -= player.stats.meleeDamage;
+                        if (victim.hp <= 0) {
+                            victim.hp = 0;
+                            victim.isDead = true;
+                            victim.respawnTime = now + 5000;
+                        }
+                    }
+                }
+            }
+            io.emit('melee_effect', { x: player.x, y: player.y, angle: angle, range: player.stats.meleeRange, arc: player.stats.meleeArc });
         }
     });
 
@@ -118,25 +193,10 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('shoot', (dir: { x: number, y: number }) => {
-        const player = players[socket.id];
-        if (player && !player.isDead) {
-            const angle = Math.atan2(dir.y, dir.x);
-            projectiles.push({
-                id: Math.random().toString(36).substr(2, 9),
-                ownerId: socket.id,
-                x: player.x,
-                y: player.y,
-                vx: Math.cos(angle) * PROJECTILE_SPEED,
-                vy: Math.sin(angle) * PROJECTILE_SPEED
-            });
-        }
-    });
-
     socket.on('chat', (msg: string) => {
         const player = players[socket.id];
         if (player) {
-            player.message = msg.substring(0, 50); // Limit chat length
+            player.message = msg.substring(0, 50); 
             player.messageTime = Date.now();
         }
     });
@@ -152,7 +212,7 @@ let lastTickTime = Date.now();
 // Server Tick Loop (30Hz)
 setInterval(() => {
     const now = Date.now();
-    const dt = (now - lastTickTime) / 1000; // Delta time in seconds
+    const dt = (now - lastTickTime) / 1000; 
     lastTickTime = now;
     
     // Update Projectiles and Collision
@@ -163,7 +223,6 @@ setInterval(() => {
         p.x += p.vx * dt;
         p.y += p.vy * dt;
 
-        // 1. Collision Check with Players
         for (const id in players) {
             const victim = players[id];
             if (victim.isDead || id === p.ownerId || victim.isDashing) continue; 
@@ -175,7 +234,7 @@ setInterval(() => {
             if (distance < 20) { 
                 const attacker = players[p.ownerId];
                 if (attacker) {
-                    victim.hp -= attacker.atk;
+                    victim.hp -= attacker.stats.meleeDamage / 2.5; // Projectile damage linked to melee/atk
                     if (victim.hp <= 0) {
                         victim.hp = 0;
                         victim.isDead = true;
@@ -186,22 +245,18 @@ setInterval(() => {
             }
         }
 
-        // 2. Collision Check with other Projectiles
         for (let j = i + 1; j < projectiles.length; j++) {
             const p2 = projectiles[j];
             if (p.ownerId === p2.ownerId) continue; 
-
             const dx = p.x - p2.x;
             const dy = p.y - p2.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
-
             if (distance < 10) { 
                 projectilesToRemove.add(p.id);
                 projectilesToRemove.add(p2.id);
             }
         }
 
-        // 3. Remove projectiles that go off-screen
         if (p.x < -50 || p.x > WORLD_WIDTH + 50 || p.y < -50 || p.y > WORLD_HEIGHT + 50) {
             projectilesToRemove.add(p.id);
         }
@@ -212,24 +267,51 @@ setInterval(() => {
     for (const id in players) {
         const player = players[id];
         
-        // Handle Respawn
         if (player.isDead && now >= player.respawnTime) {
             player.isDead = false;
-            player.hp = player.maxHp;
+            player.hp = player.stats.maxHp;
             player.x = Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50;
             player.y = Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50;
             player.dashCharges = MAX_DASH_CHARGES;
+            player.ammo = player.stats.maxAmmo;
+            player.isReloading = false;
         }
 
-        // Handle Dash recharge
+        // Handle Reloading
+        if (player.isReloading && now >= player.reloadEndTime) {
+            player.ammo = player.stats.maxAmmo;
+            player.isReloading = false;
+        }
+
+        // Handle Shooting (Auto-fire)
+        if (!player.isDead && !player.isReloading && player.input?.shooting) {
+            if (now - player.lastShootTime >= player.stats.shootInterval) {
+                if (player.ammo > 0) {
+                    player.ammo--;
+                    player.lastShootTime = now;
+                    const angle = player.input.shootAngle;
+                    projectiles.push({
+                        id: Math.random().toString(36).substr(2, 9),
+                        ownerId: player.id,
+                        x: player.x,
+                        y: player.y,
+                        vx: Math.cos(angle) * player.stats.projectileSpeed,
+                        vy: Math.sin(angle) * player.stats.projectileSpeed
+                    });
+                } else {
+                    player.isReloading = true;
+                    player.reloadEndTime = now + player.stats.reloadTime;
+                }
+            }
+        }
+
         if (player.dashCharges < MAX_DASH_CHARGES) {
-            if (now - player.lastDashChargeTime >= DASH_RECHARGE_MS) {
+            if (now - player.lastDashChargeTime >= player.stats.dashRecharge) {
                 player.dashCharges++;
                 player.lastDashChargeTime = now;
             }
         }
 
-        // Handle Movement and Dash
         if (player.isDashing) {
             if (now >= player.dashEndTime) {
                 player.isDashing = false;
@@ -247,16 +329,14 @@ setInterval(() => {
 
             if (dx !== 0 || dy !== 0) {
                 const mag = Math.sqrt(dx * dx + dy * dy);
-                player.x += (dx / mag) * BASE_SPEED * dt;
-                player.y += (dy / mag) * BASE_SPEED * dt;
+                player.x += (dx / mag) * player.stats.baseSpeed * dt;
+                player.y += (dy / mag) * player.stats.baseSpeed * dt;
             }
         }
 
-        // Boundary check
         player.x = Math.max(15, Math.min(WORLD_WIDTH - 15, player.x));
         player.y = Math.max(15, Math.min(WORLD_HEIGHT - 15, player.y));
 
-        // Clear chat messages after 5 seconds
         if (player.message && now - player.messageTime > 5000) {
             player.message = '';
         }

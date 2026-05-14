@@ -25,6 +25,11 @@
         #chat-input { width: 100%; padding: 10px; border-radius: 20px; border: 2px solid #4caf50; background: rgba(0,0,0,0.7); color: white; outline: none; }
 
         #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; opacity: 0.7; }
+        #combat-ui { position: absolute; bottom: 10px; left: 10px; pointer-events: none; }
+        .ammo-bar { width: 150px; height: 15px; background: #333; border: 2px solid #555; position: relative; }
+        .ammo-fill { height: 100%; background: #ffcc00; width: 100%; transition: width 0.1s; }
+        .reload-text { position: absolute; width: 100%; text-align: center; top: -20px; font-weight: bold; color: #ff3300; display: none; }
+
         #dash-ui { position: absolute; bottom: 10px; right: 10px; pointer-events: none; text-align: right; }
         .dash-charge { display: inline-block; width: 30px; height: 10px; background: #555; margin-left: 5px; border-radius: 5px; overflow: hidden; }
         .dash-charge-fill { height: 100%; background: #00e5ff; width: 0%; transition: width 0.1s; }
@@ -57,7 +62,13 @@
         </div>
 
         <div id="ui">
-            <p>WASD to move | Click to Shoot | Right Click/Shift to Dash</p>
+            <p>WASD to move | Left Click: Auto-Shoot | Right Click: Melee | R: Reload | Shift: Dash</p>
+        </div>
+
+        <div id="combat-ui">
+            <div id="reload-label" class="reload-text">RELOADING...</div>
+            <div class="ammo-bar"><div id="ammo-fill" class="ammo-fill"></div></div>
+            <div style="margin-top: 5px;">AMMO: <span id="ammo-count">20</span> / 20</div>
         </div>
 
         <div id="dash-ui">
@@ -81,6 +92,9 @@
         const chatInputContainer = document.getElementById('chat-input-container');
         const chatInput = document.getElementById('chat-input');
         const dashContainer = document.getElementById('dash-container');
+        const ammoFill = document.getElementById('ammo-fill');
+        const ammoCount = document.getElementById('ammo-count');
+        const reloadLabel = document.getElementById('reload-label');
 
         const WORLD_WIDTH = 1024;
         const WORLD_HEIGHT = 576;
@@ -92,12 +106,13 @@
         let clientProjectiles = new Map(); 
         let particles = []; 
         let ghosts = []; 
+        let meleeEffects = [];
         let stateBuffer = []; 
         const RENDER_DELAY = 100; 
         let inGame = false;
         let isChatting = false;
 
-        const keys = { w: false, a: false, s: false, d: false };
+        const keys = { w: false, a: false, s: false, d: false, shooting: false };
         let mouseX = 0;
         let mouseY = 0;
         let worldMouseX = 0;
@@ -175,8 +190,13 @@
 
             if (isChatting) return;
 
+            if (e.key.toLowerCase() === 'r') {
+                socket.emit('reload');
+                return;
+            }
+
             if (e.key === 'Shift') {
-                handleDash('shift');
+                handleDash();
                 return;
             }
 
@@ -193,7 +213,6 @@
             const rect = canvas.getBoundingClientRect();
             mouseX = e.clientX - rect.left;
             mouseY = e.clientY - rect.top;
-            // Update world mouse position based on current camera
             worldMouseX = mouseX + cameraX;
             worldMouseY = mouseY + cameraY;
         });
@@ -202,37 +221,35 @@
             if (!inGame || isChatting) return;
             
             if (e.button === 0) { 
+                keys.shooting = true;
+            } else if (e.button === 2) { 
                 const myPlayer = players[myId];
                 if (myPlayer && !myPlayer.isDead) {
-                    const dirX = worldMouseX - myPlayer.x;
-                    const dirY = worldMouseY - myPlayer.y;
-                    socket.emit('shoot', { x: dirX, y: dirY });
+                    const angle = Math.atan2(worldMouseY - myPlayer.y, worldMouseX - myPlayer.x);
+                    socket.emit('melee', angle);
                 }
-            } else if (e.button === 2) { 
-                handleDash('mouse');
             }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (e.button === 0) keys.shooting = false;
         });
 
         canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-        function handleDash(type) {
+        function handleDash() {
             const myPlayer = players[myId];
             if (!myPlayer || myPlayer.isDead || myPlayer.isDashing || myPlayer.dashCharges <= 0) return;
 
             let dirX = 0;
             let dirY = 0;
 
-            if (type === 'shift') {
-                if (keys.w) dirY -= 1;
-                if (keys.s) dirY += 1;
-                if (keys.a) dirX -= 1;
-                if (keys.d) dirX += 1;
-                
-                if (dirX === 0 && dirY === 0) {
-                    dirX = worldMouseX - myPlayer.x;
-                    dirY = worldMouseY - myPlayer.y;
-                }
-            } else {
+            if (keys.w) dirY -= 1;
+            if (keys.s) dirY += 1;
+            if (keys.a) dirX -= 1;
+            if (keys.d) dirX += 1;
+            
+            if (dirX === 0 && dirY === 0) {
                 dirX = worldMouseX - myPlayer.x;
                 dirY = worldMouseY - myPlayer.y;
             }
@@ -244,6 +261,10 @@
 
         socket.on('init', (id) => {
             myId = id;
+        });
+
+        socket.on('melee_effect', (data) => {
+            meleeEffects.push({ ...data, life: 1.0 });
         });
 
         socket.on('state', (serverData) => {
@@ -296,8 +317,24 @@
                     deathScreen.style.display = 'none';
                 }
                 updateDashUI(myPlayer);
+                updateCombatUI(myPlayer);
             }
         });
+
+        function updateCombatUI(player) {
+            ammoCount.innerText = player.ammo;
+            if (player.isReloading) {
+                reloadLabel.style.display = 'block';
+                const total = 2000;
+                const elapsed = total - (player.reloadEndTime - Date.now());
+                const percent = Math.min(100, (elapsed / total) * 100);
+                ammoFill.style.width = percent + '%';
+            } else {
+                reloadLabel.style.display = 'none';
+                const percent = (player.ammo / player.maxAmmo) * 100;
+                ammoFill.style.width = percent + '%';
+            }
+        }
 
         function updateDashUI(player) {
             dashContainer.innerHTML = '';
@@ -322,7 +359,12 @@
 
         function update() {
             if (inGame && !isChatting) {
-                socket.emit('input', keys);
+                const myPlayer = players[myId];
+                let angle = 0;
+                if (myPlayer) {
+                    angle = Math.atan2(worldMouseY - myPlayer.y, worldMouseX - myPlayer.x);
+                }
+                socket.emit('input', { ...keys, shootAngle: angle });
             }
         }
 
@@ -380,7 +422,7 @@
             ctx.fillRect(barX, barY, hpWidth, height);
         }
 
-        function drawGrid(camX, camY) {
+        function drawGrid() {
             ctx.strokeStyle = '#333';
             ctx.lineWidth = 1;
             const gridSize = 50;
@@ -396,10 +438,37 @@
             }
             ctx.stroke();
 
-            // World Border
             ctx.strokeStyle = '#555';
             ctx.lineWidth = 5;
             ctx.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+        }
+
+        function drawMeleeSwing(ctx, x, y, angle, life, range, arc) {
+            const radius = range || 80;
+            const currentArc = arc || Math.PI;
+            
+            // Outer glow
+            ctx.beginPath();
+            ctx.arc(x, y, radius, angle - currentArc / 2, angle + currentArc / 2);
+            ctx.lineWidth = 15 * life;
+            ctx.strokeStyle = `rgba(0, 229, 255, ${life * 0.4})`;
+            ctx.stroke();
+
+            // Inner swing
+            ctx.beginPath();
+            ctx.arc(x, y, radius - 5, angle - currentArc / 2, angle + currentArc / 2);
+            ctx.lineWidth = 5 * life;
+            ctx.strokeStyle = `rgba(255, 255, 255, ${life * 0.8})`;
+            ctx.stroke();
+
+            // Flash effect at the center
+            if (life > 0.8) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${(life - 0.8) * 5})`;
+                ctx.beginPath();
+                ctx.arc(x, y, radius, angle - currentArc / 2, angle + currentArc / 2);
+                ctx.lineTo(x, y);
+                ctx.fill();
+            }
         }
 
         function draw() {
@@ -408,7 +477,6 @@
             lastTimestamp = now;
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
             const renderTime = now - RENDER_DELAY;
             let state1 = null;
             let state2 = null;
@@ -422,27 +490,19 @@
                 }
             }
 
-            // --- Camera System ---
             const myPlayer = players[myId];
             if (myPlayer) {
                 let targetX = myPlayer.x;
                 let targetY = myPlayer.y;
-                
-                // Interpolate camera for smooth tracking
                 if (state1 && state2 && state1.players[myId] && state2.players[myId]) {
                     const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
                     targetX = interpolate(state1.players[myId].x, state2.players[myId].x, ratio);
                     targetY = interpolate(state1.players[myId].y, state2.players[myId].y, ratio);
                 }
-
                 cameraX = targetX - VIEW_WIDTH / 2;
                 cameraY = targetY - VIEW_HEIGHT / 2;
-
-                // Clamp camera to world bounds
                 cameraX = Math.max(0, Math.min(cameraX, WORLD_WIDTH - VIEW_WIDTH));
                 cameraY = Math.max(0, Math.min(cameraY, WORLD_HEIGHT - VIEW_HEIGHT));
-                
-                // Update world mouse coords
                 worldMouseX = mouseX + cameraX;
                 worldMouseY = mouseY + cameraY;
             }
@@ -452,7 +512,6 @@
 
             drawGrid();
 
-            // Update & Draw Ghosts
             ghosts = ghosts.filter(g => {
                 g.life -= dt / 400; 
                 if (g.life <= 0) return false;
@@ -463,7 +522,13 @@
                 return true;
             });
 
-            // Update & Draw Particles
+            meleeEffects = meleeEffects.filter(m => {
+                m.life -= dt / 250; // Slower fade for better visibility
+                if (m.life <= 0) return false;
+                drawMeleeSwing(ctx, m.x, m.y, m.angle, m.life, m.range, m.arc);
+                return true;
+            });
+
             particles = particles.filter(p => {
                 p.update(dt);
                 p.draw(ctx);
@@ -483,18 +548,14 @@
             for (const id in players) {
                 const player = players[id];
                 if (player.isDead) continue;
-
                 let renderX = player.x;
                 let renderY = player.y;
-
                 if (state1 && state2 && state1.players[id] && state2.players[id]) {
                     const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
                     renderX = interpolate(state1.players[id].x, state2.players[id].x, ratio);
                     renderY = interpolate(state1.players[id].y, state2.players[id].y, ratio);
                 }
-                
                 if (id === myId) drawAimIndicator(renderX, renderY);
-
                 if (player.isDashing) {
                     if (Math.random() > 0.4) createGhost(renderX, renderY, player.color);
                     ctx.fillStyle = player.color;
@@ -502,16 +563,13 @@
                     ctx.fillRect(renderX - 20, renderY - 20, 40, 40);
                     ctx.globalAlpha = 1.0;
                 }
-
                 ctx.fillStyle = player.color;
                 ctx.fillRect(renderX - 15, renderY - 15, 30, 30);
-
                 if (id === myId) {
                     ctx.strokeStyle = 'white';
                     ctx.lineWidth = 2;
                     ctx.strokeRect(renderX - 15, renderY - 15, 30, 30);
                 }
-
                 drawHPBar(renderX, renderY, player.hp, player.maxHp);
                 ctx.fillStyle = 'white';
                 ctx.font = 'bold 14px Arial';
@@ -519,9 +577,7 @@
                 ctx.fillText(player.nickname, renderX, renderY - 35);
                 if (player.message) drawChatBubble(renderX, renderY, player.message);
             }
-
             ctx.restore();
-
             requestAnimationFrame(draw);
         }
 
