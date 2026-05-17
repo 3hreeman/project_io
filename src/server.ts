@@ -40,6 +40,11 @@ interface Player {
     stats: PlayerStats; // Centralized for upgrades
     isDead: boolean;
     respawnTime: number;
+    // Leaderboard Data
+    kills: number;
+    deaths: number;
+    score: number;
+    joinTime: number;
     // Combat State
     ammo: number;
     isReloading: boolean;
@@ -58,16 +63,24 @@ interface Player {
 
 const INITIAL_STATS: PlayerStats = {
     baseSpeed: 150,
-    shootInterval: 100, // 0.1s as requested
+    shootInterval: 100,
     projectileSpeed: 300,
-    meleeCooldown: 2000, // 2s as requested
+    meleeCooldown: 2000,
     meleeDamage: 25,
-    meleeRange: 80, // Doubled from 40
-    meleeArc: Math.PI, // Doubled from 90 to 180 degrees
+    meleeRange: 80,
+    meleeArc: Math.PI,
     maxAmmo: 20,
     reloadTime: 2000,
     maxHp: 100,
     dashRecharge: 5000
+};
+
+const RAPID_STATS: PlayerStats = {
+    ...INITIAL_STATS,
+    baseSpeed: 225,
+    shootInterval: 50,
+    maxHp: 60,
+    meleeDamage: 15
 };
 
 interface Projectile {
@@ -79,8 +92,11 @@ interface Projectile {
     vy: number;
 }
 
-const players: { [id: string]: Player } = {};
-let projectiles: Projectile[] = [];
+const players: { [id: string]: Player & { mode: string } } = {};
+const modeStates: { [mode: string]: { projectiles: Projectile[] } } = {
+    standard: { projectiles: [] },
+    rapid: { projectiles: [] }
+};
 
 const MAX_DASH_CHARGES = 2;
 const DASH_DURATION_MS = 150; 
@@ -98,20 +114,28 @@ const getRandomColor = () => {
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
 
-    socket.on('join', (nickname: string) => {
+    socket.on('join', (data: { nickname: string, mode: string }) => {
+        const mode = data.mode === 'rapid' ? 'rapid' : 'standard';
+        const stats = mode === 'rapid' ? RAPID_STATS : INITIAL_STATS;
+
         players[socket.id] = {
             id: socket.id,
+            mode: mode,
             x: Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50,
             y: Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50,
             color: getRandomColor(),
-            nickname: nickname || 'Guest',
+            nickname: data.nickname || 'Guest',
             message: '',
             messageTime: 0,
-            hp: INITIAL_STATS.maxHp,
-            stats: { ...INITIAL_STATS },
+            hp: stats.maxHp,
+            stats: { ...stats },
             isDead: false,
             respawnTime: 0,
-            ammo: INITIAL_STATS.maxAmmo,
+            kills: 0,
+            deaths: 0,
+            score: 0,
+            joinTime: Date.now(),
+            ammo: stats.maxAmmo,
             isReloading: false,
             reloadEndTime: 0,
             lastShootTime: 0,
@@ -123,7 +147,20 @@ io.on('connection', (socket) => {
             dashVx: 0,
             dashVy: 0
         };
+        socket.join(mode);
         socket.emit('init', socket.id);
+    });
+
+    socket.on('get_leaderboard', () => {
+        const playerList = Object.values(players).map(p => ({
+            nickname: p.nickname,
+            kills: p.kills,
+            deaths: p.deaths,
+            score: p.score,
+            joinTime: p.joinTime,
+            color: p.color
+        })).sort((a, b) => b.score - a.score);
+        socket.emit('leaderboard_data', playerList);
     });
 
     socket.on('input', (input: { w: boolean, a: boolean, s: boolean, d: boolean, shooting: boolean, shootAngle: number }) => {
@@ -150,6 +187,7 @@ io.on('connection', (socket) => {
             for (const id in players) {
                 if (id === socket.id) continue;
                 const victim = players[id];
+                if (victim.mode !== player.mode) continue; 
                 if (victim.isDead || victim.isDashing) continue;
 
                 const dx = victim.x - player.x;
@@ -167,11 +205,17 @@ io.on('connection', (socket) => {
                             victim.hp = 0;
                             victim.isDead = true;
                             victim.respawnTime = now + 5000;
+                            victim.deaths++;
+                            player.kills++;
+                            player.score += 10;
+                            // Immediately move to next spawn position
+                            victim.x = Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50;
+                            victim.y = Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50;
                         }
                     }
                 }
             }
-            io.emit('melee_effect', { x: player.x, y: player.y, angle: angle, range: player.stats.meleeRange, arc: player.stats.meleeArc });
+            io.to(player.mode).emit('melee_effect', { x: player.x, y: player.y, angle: angle, range: player.stats.meleeRange, arc: player.stats.meleeArc });
         }
     });
 
@@ -201,6 +245,10 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('ping_check', (ts: number) => {
+        socket.emit('pong', Date.now() - ts);
+    });
+
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
         delete players[socket.id];
@@ -215,63 +263,74 @@ setInterval(() => {
     const dt = (now - lastTickTime) / 1000; 
     lastTickTime = now;
     
-    // Update Projectiles and Collision
-    let projectilesToRemove = new Set<string>();
+    // Process each mode
+    for (const mode in modeStates) {
+        let projectiles = modeStates[mode].projectiles;
+        let projectilesToRemove = new Set<string>();
 
-    for (let i = 0; i < projectiles.length; i++) {
-        const p = projectiles[i];
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
+        // Update Projectiles and Collision
+        for (let i = 0; i < projectiles.length; i++) {
+            const p = projectiles[i];
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
 
-        for (const id in players) {
-            const victim = players[id];
-            if (victim.isDead || id === p.ownerId || victim.isDashing) continue; 
+            for (const id in players) {
+                const victim = players[id];
+                if (victim.mode !== mode) continue; // Segregate by mode
+                if (victim.isDead || id === p.ownerId || victim.isDashing) continue; 
 
-            const dx = p.x - victim.x;
-            const dy = p.y - victim.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
+                const dx = p.x - victim.x;
+                const dy = p.y - victim.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
 
-            if (distance < 20) { 
-                const attacker = players[p.ownerId];
-                if (attacker) {
-                    victim.hp -= attacker.stats.meleeDamage / 2.5; // Projectile damage linked to melee/atk
-                    if (victim.hp <= 0) {
-                        victim.hp = 0;
-                        victim.isDead = true;
-                        victim.respawnTime = now + 5000;
+                if (distance < 20) { 
+                    const attacker = players[p.ownerId];
+                    if (attacker) {
+                        victim.hp -= attacker.stats.meleeDamage / 2.5;
+                        if (victim.hp <= 0) {
+                            victim.hp = 0;
+                            victim.isDead = true;
+                            victim.respawnTime = now + 5000;
+                            victim.deaths++;
+                            attacker.kills++;
+                            attacker.score += 10;
+                            // Immediately move to next spawn position
+                            victim.x = Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50;
+                            victim.y = Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50;
+                        }
                     }
+                    projectilesToRemove.add(p.id);
                 }
+            }
+
+            for (let j = i + 1; j < projectiles.length; j++) {
+                const p2 = projectiles[j];
+                if (p.ownerId === p2.ownerId) continue; 
+                const dx = p.x - p2.x;
+                const dy = p.y - p2.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance < 10) { 
+                    projectilesToRemove.add(p.id);
+                    projectilesToRemove.add(p2.id);
+                }
+            }
+
+            if (p.x < -50 || p.x > WORLD_WIDTH + 50 || p.y < -50 || p.y > WORLD_HEIGHT + 50) {
                 projectilesToRemove.add(p.id);
             }
         }
 
-        for (let j = i + 1; j < projectiles.length; j++) {
-            const p2 = projectiles[j];
-            if (p.ownerId === p2.ownerId) continue; 
-            const dx = p.x - p2.x;
-            const dy = p.y - p2.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            if (distance < 10) { 
-                projectilesToRemove.add(p.id);
-                projectilesToRemove.add(p2.id);
-            }
-        }
-
-        if (p.x < -50 || p.x > WORLD_WIDTH + 50 || p.y < -50 || p.y > WORLD_HEIGHT + 50) {
-            projectilesToRemove.add(p.id);
-        }
+        modeStates[mode].projectiles = projectiles.filter(p => !projectilesToRemove.has(p.id));
     }
 
-    projectiles = projectiles.filter(p => !projectilesToRemove.has(p.id));
-
+    // Update Players
     for (const id in players) {
         const player = players[id];
+        const mode = player.mode;
         
         if (player.isDead && now >= player.respawnTime) {
             player.isDead = false;
             player.hp = player.stats.maxHp;
-            player.x = Math.floor(Math.random() * (WORLD_WIDTH - 100)) + 50;
-            player.y = Math.floor(Math.random() * (WORLD_HEIGHT - 100)) + 50;
             player.dashCharges = MAX_DASH_CHARGES;
             player.ammo = player.stats.maxAmmo;
             player.isReloading = false;
@@ -290,7 +349,7 @@ setInterval(() => {
                     player.ammo--;
                     player.lastShootTime = now;
                     const angle = player.input.shootAngle;
-                    projectiles.push({
+                    modeStates[mode].projectiles.push({
                         id: Math.random().toString(36).substr(2, 9),
                         ownerId: player.id,
                         x: player.x,
@@ -340,8 +399,27 @@ setInterval(() => {
         if (player.message && now - player.messageTime > 5000) {
             player.message = '';
         }
+
+        // Survival Score Bonus (e.g., +1 score every 10 seconds)
+        if (!player.isDead && (now - player.joinTime) % 10000 < 33) {
+            player.score += 1;
+        }
     }
-    io.emit('state', { players, projectiles, ts: Date.now() });
+
+    // Emit state per mode
+    for (const mode in modeStates) {
+        const modePlayers: { [id: string]: Player } = {};
+        for (const id in players) {
+            if (players[id].mode === mode) {
+                modePlayers[id] = players[id];
+            }
+        }
+        io.to(mode).emit('state', { 
+            players: modePlayers, 
+            projectiles: modeStates[mode].projectiles, 
+            ts: Date.now() 
+        });
+    }
 }, 1000 / 30);
 
 server.listen(PORT, () => {

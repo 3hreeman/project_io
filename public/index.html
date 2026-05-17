@@ -14,9 +14,7 @@
             background: rgba(0,0,0,0.85); display: flex; flex-direction: column;
             justify-content: center; align-items: center; z-index: 10;
         }
-        #overlay input { padding: 12px; font-size: 18px; border: none; border-radius: 4px; margin-bottom: 15px; width: 250px; text-align: center; }
-        #overlay button { padding: 10px 30px; font-size: 18px; cursor: pointer; background: #4caf50; color: white; border: none; border-radius: 4px; transition: 0.2s; }
-        #overlay button:hover { background: #45a049; }
+        #overlay h1 { margin-bottom: 30px; }
 
         #chat-input-container {
             position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -42,14 +40,60 @@
         }
         #death-screen h1 { font-size: 64px; color: #ff0000; text-shadow: 2px 2px 10px black; margin: 0; }
         #respawn-timer { font-size: 24px; color: white; margin-top: 20px; }
+
+        #debug-panel {
+            position: absolute; top: 10px; right: 10px; width: 220px;
+            background: rgba(0, 0, 0, 0.6); border: 1px solid #555;
+            padding: 10px; font-family: monospace; font-size: 12px; color: #0f0;
+            display: none; z-index: 100; pointer-events: none;
+        }
+        .debug-item { margin-bottom: 4px; display: flex; justify-content: space-between; }
+        .debug-label { color: #aaa; }
+
+        #leaderboard {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.85); border: 2px solid #4caf50;
+            padding: 20px; width: 500px; display: none; z-index: 200;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            border-radius: 8px; box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #leaderboard h2 { text-align: center; margin-top: 0; color: #4caf50; }
+        #leaderboard table { width: 100%; border-collapse: collapse; color: white; }
+        #leaderboard th { border-bottom: 1px solid #555; padding: 10px; text-align: left; color: #aaa; font-size: 14px; }
+        #leaderboard td { padding: 10px; border-bottom: 1px solid #333; font-size: 14px; }
+        .lb-nick { font-weight: bold; }
+        .lb-me { background: rgba(76, 175, 80, 0.2); }
     </style>
 </head>
-<body>
     <div id="game-container">
-        <div id="overlay">
-            <h1 style="margin-bottom: 30px;">.io Game Prototype</h1>
-            <input type="text" id="nickname" placeholder="Enter Nickname" maxlength="12">
-            <button id="start-btn">Join Game</button>
+        <div id="leaderboard">
+            <h2>LEADERBOARD</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>NICKNAME</th>
+                        <th style="text-align:center">K</th>
+                        <th style="text-align:center">D</th>
+                        <th style="text-align:center">SCORE</th>
+                        <th style="text-align:right">TIME</th>
+                    </tr>
+                </thead>
+                <tbody id="leaderboard-body"></tbody>
+            </table>
+            <div style="text-align:center; color:#888; font-size:12px; margin-top:15px;">Press TAB to close</div>
+        </div>
+        <div id="debug-panel">
+            <div style="font-weight: bold; border-bottom: 1px solid #555; margin-bottom: 8px; padding-bottom: 4px;">NETWORK MONITOR</div>
+            <div class="debug-item"><span class="debug-label">Ping:</span><span id="debug-ping">0 ms</span></div>
+            <div class="debug-item"><span class="debug-label">FPS:</span><span id="debug-fps">0</span></div>
+            <div class="debug-item"><span class="debug-label">Buffer:</span><span id="debug-buffer">0</span></div>
+            <div class="debug-item"><span class="debug-label">Mode:</span><span id="debug-mode">-</span></div>
+            <div class="debug-item"><span class="debug-label">Pos:</span><span id="debug-pos">0, 0</span></div>
+            <div class="debug-item"><span class="debug-label">Players:</span><span id="debug-players">0</span></div>
+            <div style="border-top: 1px solid #555; margin-top: 8px; padding-top: 4px;"></div>
+            <div class="debug-item"><span class="debug-label">Time:</span><span id="debug-time">00:00:00</span></div>
+            <div class="debug-item"><span class="debug-label">Data S:</span><span id="debug-sent">0 KB</span></div>
+            <div class="debug-item"><span class="debug-label">Data R:</span><span id="debug-received">0 KB</span></div>
         </div>
 
         <div id="death-screen">
@@ -84,17 +128,67 @@
         const socket = io();
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
-        const overlay = document.getElementById('overlay');
         const deathScreen = document.getElementById('death-screen');
         const respawnTimerText = document.getElementById('respawn-timer');
-        const startBtn = document.getElementById('start-btn');
-        const nicknameInput = document.getElementById('nickname');
         const chatInputContainer = document.getElementById('chat-input-container');
         const chatInput = document.getElementById('chat-input');
         const dashContainer = document.getElementById('dash-container');
         const ammoFill = document.getElementById('ammo-fill');
         const ammoCount = document.getElementById('ammo-count');
         const reloadLabel = document.getElementById('reload-label');
+        const leaderboard = document.getElementById('leaderboard');
+        const leaderboardBody = document.getElementById('leaderboard-body');
+
+        // Debug UI Elements
+        const debugPanel = document.getElementById('debug-panel');
+        const debugPing = document.getElementById('debug-ping');
+        const debugFps = document.getElementById('debug-fps');
+        const debugBuffer = document.getElementById('debug-buffer');
+        const debugMode = document.getElementById('debug-mode');
+        const debugPos = document.getElementById('debug-pos');
+        const debugPlayers = document.getElementById('debug-players');
+        const debugTime = document.getElementById('debug-time');
+        const debugSent = document.getElementById('debug-sent');
+        const debugReceived = document.getElementById('debug-received');
+
+        let showDebug = false;
+        let showLeaderboard = false;
+        let lastPingTime = 0;
+        let ping = 0;
+        let fps = 0;
+        let frameCount = 0;
+        let lastFpsUpdate = Date.now();
+        let connectionStartTime = Date.now();
+        let totalSentBytes = 0;
+        let totalReceivedBytes = 0;
+
+        // Data Tracking
+        const formatBytes = (bytes) => {
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+            return (bytes / 1048576).toFixed(2) + " MB";
+        };
+
+        const formatTime = (ms) => {
+            const totalSec = Math.floor(ms / 1000);
+            const m = Math.floor(totalSec / 60);
+            const s = totalSec % 60;
+            return `${m}m ${s}s`;
+        };
+
+        const originalEmit = socket.emit;
+        socket.emit = function(...args) {
+            totalSentBytes += JSON.stringify(args).length;
+            return originalEmit.apply(this, args);
+        };
+
+        const originalOn = socket.on;
+        socket.on = function(event, callback) {
+            return originalOn.call(this, event, function(...args) {
+                totalReceivedBytes += JSON.stringify(args).length;
+                callback.apply(this, args);
+            });
+        };
 
         const WORLD_WIDTH = 1024;
         const WORLD_HEIGHT = 576;
@@ -109,7 +203,7 @@
         let meleeEffects = [];
         let stateBuffer = []; 
         const RENDER_DELAY = 100; 
-        let inGame = false;
+        let inGame = true;
         let isChatting = false;
 
         const keys = { w: false, a: false, s: false, d: false, shooting: false };
@@ -120,6 +214,7 @@
         let cameraX = 0;
         let cameraY = 0;
         let lastTimestamp = Date.now();
+        let deathCameraPos = null;
 
         // --- Particle System ---
         class Particle {
@@ -158,21 +253,29 @@
             ghosts.push({ x, y, color, life: 1.0 });
         }
 
-        // Game Start
-        startBtn.onclick = () => {
-            const nick = nicknameInput.value.trim();
-            if (nick) {
-                socket.emit('join', nick);
-                overlay.style.display = 'none';
-                inGame = true;
-            } else {
-                alert("Please enter a nickname!");
-            }
-        };
+        // Instant Join with Random Nickname
+        const randomNick = "Player_" + Math.floor(Math.random() * 1000);
+        socket.emit('join', { nickname: randomNick, mode: 'rapid' });
+        debugMode.innerText = 'RAPID';
 
         window.addEventListener('keydown', (e) => {
-            if (!inGame) return;
-            
+            if (e.ctrlKey && e.key.toLowerCase() === 'i') {
+                e.preventDefault();
+                showDebug = !showDebug;
+                debugPanel.style.display = showDebug ? 'block' : 'none';
+                return;
+            }
+
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                if (!showLeaderboard) {
+                    socket.emit('get_leaderboard');
+                }
+                showLeaderboard = !showLeaderboard;
+                leaderboard.style.display = showLeaderboard ? 'block' : 'none';
+                return;
+            }
+
             if (e.key === 'Enter') {
                 if (isChatting) {
                     const msg = chatInput.value.trim();
@@ -187,19 +290,9 @@
                 }
                 return;
             }
-
             if (isChatting) return;
-
-            if (e.key.toLowerCase() === 'r') {
-                socket.emit('reload');
-                return;
-            }
-
-            if (e.key === 'Shift') {
-                handleDash();
-                return;
-            }
-
+            if (e.key.toLowerCase() === 'r') { socket.emit('reload'); return; }
+            if (e.key === 'Shift') { handleDash(); return; }
             const key = e.key.toLowerCase();
             if (keys.hasOwnProperty(key)) keys[key] = true;
         });
@@ -218,8 +311,7 @@
         });
 
         canvas.addEventListener('mousedown', (e) => {
-            if (!inGame || isChatting) return;
-            
+            if (isChatting) return;
             if (e.button === 0) { 
                 keys.shooting = true;
             } else if (e.button === 2) { 
@@ -240,31 +332,36 @@
         function handleDash() {
             const myPlayer = players[myId];
             if (!myPlayer || myPlayer.isDead || myPlayer.isDashing || myPlayer.dashCharges <= 0) return;
-
-            let dirX = 0;
-            let dirY = 0;
-
-            if (keys.w) dirY -= 1;
-            if (keys.s) dirY += 1;
-            if (keys.a) dirX -= 1;
-            if (keys.d) dirX += 1;
-            
+            let dirX = 0; let dirY = 0;
+            if (keys.w) dirY -= 1; if (keys.s) dirY += 1;
+            if (keys.a) dirX -= 1; if (keys.d) dirX += 1;
             if (dirX === 0 && dirY === 0) {
                 dirX = worldMouseX - myPlayer.x;
                 dirY = worldMouseY - myPlayer.y;
             }
-
-            if (dirX !== 0 || dirY !== 0) {
-                socket.emit('dash', { x: dirX, y: dirY });
-            }
+            if (dirX !== 0 || dirY !== 0) socket.emit('dash', { x: dirX, y: dirY });
         }
 
-        socket.on('init', (id) => {
-            myId = id;
-        });
+        socket.on('init', (id) => { myId = id; });
+        socket.on('melee_effect', (data) => { meleeEffects.push({ ...data, life: 1.0 }); });
+        socket.on('pong', (latency) => { ping = latency; debugPing.innerText = `${ping} ms`; });
 
-        socket.on('melee_effect', (data) => {
-            meleeEffects.push({ ...data, life: 1.0 });
+        socket.on('leaderboard_data', (data) => {
+            leaderboardBody.innerHTML = '';
+            const now = Date.now();
+            data.forEach(p => {
+                const tr = document.createElement('tr');
+                if (p.nickname === players[myId]?.nickname) tr.className = 'lb-me';
+                
+                tr.innerHTML = `
+                    <td><span class="lb-nick" style="color:${p.color}">${p.nickname}</span></td>
+                    <td style="text-align:center">${p.kills}</td>
+                    <td style="text-align:center">${p.deaths}</td>
+                    <td style="text-align:center">${p.score}</td>
+                    <td style="text-align:right">${formatTime(now - p.joinTime)}</td>
+                `;
+                leaderboardBody.appendChild(tr);
+            });
         });
 
         socket.on('state', (serverData) => {
@@ -279,7 +376,6 @@
 
             const serverProjectiles = serverData.projectiles || [];
             const serverProjIds = new Set(serverProjectiles.map(p => p.id));
-
             for (let [id, cp] of clientProjectiles) {
                 if (!serverProjIds.has(id)) {
                     if (cp.x > 0 && cp.x < WORLD_WIDTH && cp.y > 0 && cp.y < WORLD_HEIGHT) {
@@ -288,36 +384,46 @@
                     clientProjectiles.delete(id);
                 }
             }
-
             serverProjectiles.forEach(sp => {
-                if (!clientProjectiles.has(sp.id)) {
-                    clientProjectiles.set(sp.id, { ...sp });
-                } else {
+                if (!clientProjectiles.has(sp.id)) { clientProjectiles.set(sp.id, { ...sp }); } 
+                else {
                     const cp = clientProjectiles.get(sp.id);
                     const dist = Math.sqrt((cp.x - sp.x)**2 + (cp.y - sp.y)**2);
                     if (dist > 25) { cp.x = sp.x; cp.y = sp.y; }
                 }
             });
 
-            stateBuffer.push({
-                players: serverData.players,
-                ts: serverData.ts
-            });
+            stateBuffer.push({ players: serverData.players, ts: serverData.ts });
             if (stateBuffer.length > 20) stateBuffer.shift();
-            
             players = serverData.players;
 
             const myPlayer = players[myId];
             if (myPlayer) {
                 if (myPlayer.isDead) {
+                    if (!deathCameraPos) {
+                        deathCameraPos = { x: cameraX + VIEW_WIDTH/2, y: cameraY + VIEW_HEIGHT/2 };
+                    }
                     deathScreen.style.display = 'flex';
                     const remaining = Math.max(0, Math.ceil((myPlayer.respawnTime - Date.now()) / 1000));
                     respawnTimerText.innerText = `Respawning in ${remaining}s...`;
                 } else {
+                    deathCameraPos = null;
                     deathScreen.style.display = 'none';
                 }
                 updateDashUI(myPlayer);
                 updateCombatUI(myPlayer);
+                if (showDebug) {
+                    debugPos.innerText = `${Math.round(myPlayer.x)}, ${Math.round(myPlayer.y)}`;
+                    debugPlayers.innerText = Object.keys(players).length;
+                    debugBuffer.innerText = stateBuffer.length;
+                    const elapsed = Math.floor((Date.now() - connectionStartTime) / 1000);
+                    const h = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+                    const m = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+                    const s = (elapsed % 60).toString().padStart(2, '0');
+                    debugTime.innerText = `${h}:${m}:${s}`;
+                    debugSent.innerText = formatBytes(totalSentBytes);
+                    debugReceived.innerText = formatBytes(totalReceivedBytes);
+                }
             }
         });
 
@@ -343,15 +449,12 @@
                 charge.className = 'dash-charge';
                 const fill = document.createElement('div');
                 fill.className = 'dash-charge-fill';
-                
-                if (i < player.dashCharges) {
-                    fill.style.width = '100%';
-                } else if (i === player.dashCharges) {
+                if (i < player.dashCharges) { fill.style.width = '100%'; } 
+                else if (i === player.dashCharges) {
                     const elapsed = Date.now() - player.lastDashChargeTime;
                     const percent = Math.min(100, (elapsed / 5000) * 100);
                     fill.style.width = percent + '%';
                 }
-                
                 charge.appendChild(fill);
                 dashContainer.appendChild(charge);
             }
@@ -365,6 +468,10 @@
                     angle = Math.atan2(worldMouseY - myPlayer.y, worldMouseX - myPlayer.x);
                 }
                 socket.emit('input', { ...keys, shootAngle: angle });
+                if (Date.now() - lastPingTime > 1000) {
+                    lastPingTime = Date.now();
+                    socket.emit('ping_check', lastPingTime);
+                }
             }
         }
 
@@ -391,9 +498,7 @@
             ctx.fillText(text, x, bubbleY + 17);
         }
 
-        function interpolate(p1, p2, ratio) {
-            return p1 + (p2 - p1) * ratio;
-        }
+        function interpolate(p1, p2, ratio) { return p1 + (p2 - p1) * ratio; }
 
         function drawAimIndicator(x, y) {
             const angle = Math.atan2(worldMouseY - y, worldMouseX - x);
@@ -411,10 +516,8 @@
         }
 
         function drawHPBar(x, y, hp, maxHp) {
-            const width = 40;
-            const height = 6;
-            const barX = x - width / 2;
-            const barY = y + 25;
+            const width = 40; const height = 6;
+            const barX = x - width / 2; const barY = y + 25;
             ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
             ctx.fillRect(barX, barY, width, height);
             const hpWidth = (hp / maxHp) * width;
@@ -423,166 +526,131 @@
         }
 
         function drawGrid() {
-            ctx.strokeStyle = '#333';
-            ctx.lineWidth = 1;
+            ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
             const gridSize = 50;
-            
             ctx.beginPath();
-            for (let x = 0; x <= WORLD_WIDTH; x += gridSize) {
-                ctx.moveTo(x, 0);
-                ctx.lineTo(x, WORLD_HEIGHT);
-            }
-            for (let y = 0; y <= WORLD_HEIGHT; y += gridSize) {
-                ctx.moveTo(0, y);
-                ctx.lineTo(WORLD_WIDTH, y);
-            }
+            for (let x = 0; x <= WORLD_WIDTH; x += gridSize) { ctx.moveTo(x, 0); ctx.lineTo(x, WORLD_HEIGHT); }
+            for (let y = 0; y <= WORLD_HEIGHT; y += gridSize) { ctx.moveTo(0, y); ctx.lineTo(WORLD_WIDTH, y); }
             ctx.stroke();
-
-            ctx.strokeStyle = '#555';
-            ctx.lineWidth = 5;
+            ctx.strokeStyle = '#555'; ctx.lineWidth = 5;
             ctx.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
         }
 
         function drawMeleeSwing(ctx, x, y, angle, life, range, arc) {
-            const radius = range || 80;
-            const currentArc = arc || Math.PI;
-            
-            // Outer glow
+            const radius = range || 80; const currentArc = arc || Math.PI;
             ctx.beginPath();
             ctx.arc(x, y, radius, angle - currentArc / 2, angle + currentArc / 2);
             ctx.lineWidth = 15 * life;
             ctx.strokeStyle = `rgba(0, 229, 255, ${life * 0.4})`;
             ctx.stroke();
-
-            // Inner swing
             ctx.beginPath();
             ctx.arc(x, y, radius - 5, angle - currentArc / 2, angle + currentArc / 2);
             ctx.lineWidth = 5 * life;
             ctx.strokeStyle = `rgba(255, 255, 255, ${life * 0.8})`;
             ctx.stroke();
-
-            // Flash effect at the center
-            if (life > 0.8) {
-                ctx.fillStyle = `rgba(255, 255, 255, ${(life - 0.8) * 5})`;
-                ctx.beginPath();
-                ctx.arc(x, y, radius, angle - currentArc / 2, angle + currentArc / 2);
-                ctx.lineTo(x, y);
-                ctx.fill();
-            }
         }
 
         function draw() {
             const now = Date.now();
             const dt = now - lastTimestamp;
             lastTimestamp = now;
+            frameCount++;
+            if (now - lastFpsUpdate >= 1000) { fps = frameCount; frameCount = 0; lastFpsUpdate = now; if (showDebug) debugFps.innerText = fps; }
 
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             const renderTime = now - RENDER_DELAY;
-            let state1 = null;
-            let state2 = null;
+            let state1 = null; let state2 = null;
             for (let i = 0; i < stateBuffer.length - 1; i++) {
-                const s1 = stateBuffer[i];
-                const s2 = stateBuffer[i + 1];
-                if (renderTime >= s1.ts && renderTime <= s2.ts) {
-                    state1 = s1;
-                    state2 = s2;
-                    break;
-                }
+                const s1 = stateBuffer[i]; const s2 = stateBuffer[i + 1];
+                if (renderTime >= s1.ts && renderTime <= s2.ts) { state1 = s1; state2 = s2; break; }
             }
 
             const myPlayer = players[myId];
             if (myPlayer) {
-                let targetX = myPlayer.x;
-                let targetY = myPlayer.y;
-                if (state1 && state2 && state1.players[myId] && state2.players[myId]) {
-                    const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
-                    targetX = interpolate(state1.players[myId].x, state2.players[myId].x, ratio);
-                    targetY = interpolate(state1.players[myId].y, state2.players[myId].y, ratio);
+                let targetX, targetY;
+                if (deathCameraPos) {
+                    targetX = deathCameraPos.x;
+                    targetY = deathCameraPos.y;
+                } else {
+                    targetX = myPlayer.x;
+                    targetY = myPlayer.y;
+                    if (state1 && state2 && state1.players[myId] && state2.players[myId]) {
+                        const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
+                        const interpX = interpolate(state1.players[myId].x, state2.players[myId].x, ratio);
+                        const interpY = interpolate(state1.players[myId].y, state2.players[myId].y, ratio);
+                        const dist = Math.sqrt((interpX - myPlayer.x) ** 2 + (interpY - myPlayer.y) ** 2);
+                        if (dist < 50) { targetX = interpX; targetY = interpY; }
+                    }
                 }
-                cameraX = targetX - VIEW_WIDTH / 2;
-                cameraY = targetY - VIEW_HEIGHT / 2;
-                cameraX = Math.max(0, Math.min(cameraX, WORLD_WIDTH - VIEW_WIDTH));
-                cameraY = Math.max(0, Math.min(cameraY, WORLD_HEIGHT - VIEW_HEIGHT));
+
+                // Smooth Camera Easing
+                const desiredCameraX = Math.max(0, Math.min(targetX - VIEW_WIDTH / 2, WORLD_WIDTH - VIEW_WIDTH));
+                const desiredCameraY = Math.max(0, Math.min(targetY - VIEW_HEIGHT / 2, WORLD_HEIGHT - VIEW_HEIGHT));
+                
+                const cameraEase = 0.1; // 10% movement per frame
+                cameraX += (desiredCameraX - cameraX) * cameraEase;
+                cameraY += (desiredCameraY - cameraY) * cameraEase;
+
                 worldMouseX = mouseX + cameraX;
                 worldMouseY = mouseY + cameraY;
             }
 
             ctx.save();
             ctx.translate(-cameraX, -cameraY);
-
             drawGrid();
-
             ghosts = ghosts.filter(g => {
-                g.life -= dt / 400; 
-                if (g.life <= 0) return false;
-                ctx.globalAlpha = g.life * 0.4;
-                ctx.fillStyle = g.color;
-                ctx.fillRect(g.x - 15, g.y - 15, 30, 30);
-                ctx.globalAlpha = 1.0;
+                g.life -= dt / 400; if (g.life <= 0) return false;
+                ctx.globalAlpha = g.life * 0.4; ctx.fillStyle = g.color;
+                ctx.fillRect(g.x - 15, g.y - 15, 30, 30); ctx.globalAlpha = 1.0;
                 return true;
             });
-
             meleeEffects = meleeEffects.filter(m => {
-                m.life -= dt / 250; // Slower fade for better visibility
-                if (m.life <= 0) return false;
+                m.life -= dt / 250; if (m.life <= 0) return false;
                 drawMeleeSwing(ctx, m.x, m.y, m.angle, m.life, m.range, m.arc);
                 return true;
             });
-
-            particles = particles.filter(p => {
-                p.update(dt);
-                p.draw(ctx);
-                return p.life > 0;
-            });
-
+            particles = particles.filter(p => { p.update(dt); p.draw(ctx); return p.life > 0; });
             clientProjectiles.forEach(p => {
-                const dtSeconds = dt / 1000;
-                p.x += p.vx * dtSeconds;
-                p.y += p.vy * dtSeconds;
-                ctx.fillStyle = 'yellow';
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-                ctx.fill();
+                const dtSeconds = dt / 1000; p.x += p.vx * dtSeconds; p.y += p.vy * dtSeconds;
+                ctx.fillStyle = 'yellow'; ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
             });
 
             for (const id in players) {
                 const player = players[id];
                 if (player.isDead) continue;
-                let renderX = player.x;
-                let renderY = player.y;
+                let renderX = player.x; let renderY = player.y;
                 if (state1 && state2 && state1.players[id] && state2.players[id]) {
                     const ratio = (renderTime - state1.ts) / (state2.ts - state1.ts);
-                    renderX = interpolate(state1.players[id].x, state2.players[id].x, ratio);
-                    renderY = interpolate(state1.players[id].y, state2.players[id].y, ratio);
+                    const interpX = interpolate(state1.players[id].x, state2.players[id].x, ratio);
+                    const interpY = interpolate(state1.players[id].y, state2.players[id].y, ratio);
+                    
+                    // Snap if distance > 120px
+                    const dist = Math.sqrt((interpX - player.x) ** 2 + (interpY - player.y) ** 2);
+                    if (dist < 120) {
+                        renderX = interpX;
+                        renderY = interpY;
+                    }
                 }
                 if (id === myId) drawAimIndicator(renderX, renderY);
                 if (player.isDashing) {
                     if (Math.random() > 0.4) createGhost(renderX, renderY, player.color);
-                    ctx.fillStyle = player.color;
-                    ctx.globalAlpha = 0.3;
-                    ctx.fillRect(renderX - 20, renderY - 20, 40, 40);
-                    ctx.globalAlpha = 1.0;
+                    ctx.fillStyle = player.color; ctx.globalAlpha = 0.3;
+                    ctx.fillRect(renderX - 20, renderY - 20, 40, 40); ctx.globalAlpha = 1.0;
                 }
                 ctx.fillStyle = player.color;
                 ctx.fillRect(renderX - 15, renderY - 15, 30, 30);
-                if (id === myId) {
-                    ctx.strokeStyle = 'white';
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(renderX - 15, renderY - 15, 30, 30);
-                }
+                if (id === myId) { ctx.strokeStyle = 'white'; ctx.lineWidth = 2; ctx.strokeRect(renderX - 15, renderY - 15, 30, 30); }
                 drawHPBar(renderX, renderY, player.hp, player.maxHp);
-                ctx.fillStyle = 'white';
-                ctx.font = 'bold 14px Arial';
-                ctx.textAlign = 'center';
+                ctx.fillStyle = 'white'; ctx.font = 'bold 14px Arial'; ctx.textAlign = 'center';
                 ctx.fillText(player.nickname, renderX, renderY - 35);
                 if (player.message) drawChatBubble(renderX, renderY, player.message);
             }
             ctx.restore();
             requestAnimationFrame(draw);
         }
-
         setInterval(update, 1000 / 30);
         draw();
     </script>
 </body>
+</html>
 </html>
